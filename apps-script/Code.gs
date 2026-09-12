@@ -142,6 +142,35 @@ function _strip(d){ return new Date(d.getFullYear(),d.getMonth(),d.getDate()); }
 function _dueDay(v){ var d=_parseDate(v); return d?d.getDate():1; }
 function _fmtD(d){ var M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return String(d.getDate()).padStart(2,'0')+'-'+M[d.getMonth()]+'-'+String(d.getFullYear()).slice(2); }
 
+/* ============================================================
+   ONE-TIME SETUP — creates the accounting tabs the app needs.
+   In the Apps Script editor choose "setupAccountingTabs" and click Run.
+   Safe to run more than once: existing tabs and data are left untouched.
+   ============================================================ */
+function setupAccountingTabs(){
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var spec = {
+    'Cheques':   ['ID','TenantName','Unit','ChequeNo','Bank','ChequeDate','Amount','Purpose','Status','DepositedDate','Notes'],
+    'Utilities': ['ID','Unit','Type','Provider','BillDate','Month','Year','Amount','PaidBy','Status','Recoverable','RecoveredAmount','Notes'],
+    'Suppliers': ['ID','Name','Category','Contact','TRN','Notes'],
+    'Invoices':  ['ID','SupplierName','InvoiceNo','InvoiceDate','DueDate','Unit','Category','Amount','VAT','Total','PaidAmount','Balance','Status','Notes']
+  };
+  var made = [], kept = [];
+  Object.keys(spec).forEach(function(name){
+    var sh = ss.getSheetByName(name);
+    if (sh) { kept.push(name); return; }
+    sh = ss.insertSheet(name);
+    sh.getRange(1,1,1,spec[name].length).setValues([spec[name]]);
+    sh.getRange(1,1,1,spec[name].length).setFontWeight('bold').setBackground('#16305B').setFontColor('#ffffff');
+    sh.setFrozenRows(1);
+    made.push(name);
+  });
+  var msg = 'Created: ' + (made.length?made.join(', '):'none') + '  |  Already existed: ' + (kept.length?kept.join(', '):'none');
+  Logger.log(msg);
+  try { SpreadsheetApp.getUi().alert(msg); } catch(e) {}
+  return msg;
+}
+
 function doGet(e) {
   return json({ ok: true, msg: 'SARE sync endpoint is live' });
 }

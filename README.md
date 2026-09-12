@@ -123,10 +123,69 @@ private and do not upload it to GitHub.**
 
 **Rent Payments** → pick any **month/year**, then use the **All / Unpaid / Paid**
 tabs on the Rent Roll. Each row shows the tenant + phone, the rent amount, the
-**date rent is due that month** (taken from each tenant's contract start day), what
-was paid, and a status chip — `Overdue 11d`, `Due 8 Sep`, or `Paid 30 Aug`. Overdue
-rows are highlighted, with a WhatsApp reminder button and a **Collect** button.
-A red summary shows *"N unpaid · AED X outstanding this month"*.
+**date rent is due that month**, what was paid, and a status chip — `Overdue 11d`,
+`Due 8 Sep`, or `Paid 30 Aug`. Overdue rows are highlighted, with a WhatsApp reminder
+button and a **Collect** button. A red summary shows *"N unpaid · AED X outstanding"*.
+
+### How the rent due date is worked out
+
+The due day comes from **`TContractFrom`** in your `Table` tab — rent is due on the
+same day each month as the tenancy started. The column shows the date **and the
+contract start it came from**, e.g. `10 Sep 2026 · from 10 Jun 2026`.
+
+If `TContractFrom` is **blank**, the app does **not** invent a date. That row shows a
+**“Set start date”** button instead, the status stays a plain `Unpaid` (never a made-up
+“overdue” figure), and for arrears the rent is only treated as late **after month-end**
+— so nobody is chased too early. A banner lists exactly which units need fixing, and
+the button writes `TContractFrom` straight back to your sheet.
+
+## One-time setup for the new registers
+
+Cheques, Utilities and Payables live in **new tabs** in your Google Sheet. To create
+them: open the Sheet → **Extensions → Apps Script** → paste the latest `Code.gs` →
+**Save** → pick **`setupAccountingTabs`** from the function dropdown → **Run**.
+Then press **Sync** in the app. It adds `Cheques`, `Utilities`, `Suppliers` and
+`Invoices` with the right headers and leaves your existing data alone. (No redeploy
+needed — only the web-app URL needs a redeploy, and that hasn't changed.)
+
+## Accounting (registers & management dashboard)
+
+The **Accounting** section has these tabs:
+
+- **Cheques** — Post-Dated Cheque Register: cheque date, number, bank, amount,
+  purpose (rent/security) and status. KPIs for cheques on hand, **cheques to bank
+  within 7 days**, bounced value and security cheques held. Mark a cheque
+  **Cleared** or **Bounced** in one click — a bounce offers to raise the amount
+  against that tenant in **Debts & Dues** automatically.
+- **Utilities** — bills per unit (electricity, water, internet, gas, cooling), who
+  bears the cost (company vs. charged back to tenant), paid/unpaid, plus a
+  **cost-by-unit** breakdown. Company-borne utilities now flow into the P&L.
+- **Payables** — suppliers, supplier invoices with VAT, due dates, **overdue
+  flagging**, part-payments and outstanding balance per supplier.
+
+…plus the original five:
+
+- **Overview** — the management dashboard: Total Studios → Occupied → Vacant →
+  Rent Expected → Rent Collected → Outstanding → Collection % → Deposits Held →
+  Monthly Expenses → Net Rental Profit.
+- **Receivables** — Accounts Receivable **aging** per tenant (1–30 / 31–60 / 61–90 /
+  90+ days) with totals and an adjustable 3/6/12-month window.
+- **Deposits** — **Security Deposit Register**: amount and method per tenant, parsed
+  from the unit's Security field, totalled as a **liability** (never income), and
+  flagging tenants with no deposit recorded.
+- **Due Calendar** — rent falling due in the next 30 days, with collect / WhatsApp.
+- **Statements** — per-tenant **Statement of Account** (rent charged vs received,
+  month by month, balance and deposit held), printable, with a **receipt** per payment.
+
+**Receipts:** every payment in the Rent Payments history has a receipt button —
+a numbered, printable rent receipt. Recording a payment now also captures the
+**payment method** (cash / bank transfer / cheque / card / online), written to a
+`Method` column in `RentRecords` (add that column to the sheet to keep it).
+
+> **How arrears are derived:** a month counts as unpaid when there is no matching row
+> in `RentRecords`. So a payment collected but never entered in the sheet shows up as
+> debt. The app never assumes rent before a tenancy starts — it uses the contract
+> start date, or the earliest recorded payment, or the current month only.
 
 ## Rent arrears
 

@@ -6,7 +6,7 @@
 'use strict';
 
 /* ---------- Constants ---------- */
-var APP_VERSION = '1.5.0';
+var APP_VERSION = '1.7.0';
 var STORE_KEY = 'SARE_DB_v1';
 var SESSION_KEY = 'SARE_SESSION';
 var CUR = 'AED';
@@ -97,8 +97,20 @@ function defaultData(){
     recurringExpenses: s.recurringExpenses || [],
     accounts: s.accounts || {company:[], personnel:[]},
     studios: s.studios || [],
+    cheques: s.cheques || [],
+    utilities: s.utilities || [],
+    suppliers: s.suppliers || [],
+    invoices: s.invoices || [],
     users: s.users || [{username:'admin',password:'123',role:'admin'}]
   }));
+}
+/* older saved data may not have the newer registers */
+function ensureArrays(){
+  ['properties','rentRecords','debts','tasks','transactions','recurringExpenses',
+   'studios','cheques','utilities','suppliers','invoices','users'].forEach(function(k){
+    if(!Array.isArray(DB[k])) DB[k]=[];
+  });
+  if(!DB.accounts) DB.accounts={company:[],personnel:[]};
 }
 function load(){
   try{ var raw = localStorage.getItem(STORE_KEY); if(raw){ DB = JSON.parse(raw); migrateMeta(); return; } }catch(e){}
@@ -106,6 +118,7 @@ function load(){
 }
 function migrateMeta(){
   DB.meta = DB.meta || {};
+  ensureArrays();
   var seedMeta = (window.SARE_SEED && window.SARE_SEED.meta) || {};
   if(!DB.meta.sheetId) DB.meta.sheetId = seedMeta.sheetId || '';
   if(DB.meta.autoSync===undefined) DB.meta.autoSync = seedMeta.autoSync!==undefined?seedMeta.autoSync:true;
@@ -141,6 +154,20 @@ function sameUnit(a,b){ return String(a||'').trim().toLowerCase()===String(b||''
 function isRentPaid(unit, m, y){
   return DB.rentRecords.some(function(r){ return r.month===m && r.year===y && sameUnit(r.unit, unit); });
 }
+/* When a tenancy financially begins. Never guess earlier than we can evidence:
+   contract start → else the earliest recorded payment → else this month only. */
+function tenancyStartMonth(p){
+  var start=parseDate(p.contractFrom);
+  if(start) return new Date(start.getFullYear(), start.getMonth(), 1);
+  var best=null;
+  DB.rentRecords.forEach(function(r){
+    if(!sameUnit(r.unit,p.unit) || !r.year) return;
+    var v=r.year*12+((r.month||1)-1);
+    if(best===null || v<best.v) best={v:v, y:r.year, m:r.month||1};
+  });
+  if(best) return new Date(best.y, best.m-1, 1);
+  var t=new Date(); return new Date(t.getFullYear(), t.getMonth(), 1);
+}
 /* Every month whose rent is past its due date and still unpaid, for the last N months. */
 function arrearsList(lookbackMonths){
   lookbackMonths = lookbackMonths||3;
@@ -148,20 +175,81 @@ function arrearsList(lookbackMonths){
   var out=[];
   DB.properties.filter(isOccupied).forEach(function(p){
     var rent=Number(p.tenantRent)||0; if(!rent) return;
-    var start=parseDate(p.contractFrom);
-    var startMonth = start ? new Date(start.getFullYear(), start.getMonth(), 1) : null;
+    var startMonth = tenancyStartMonth(p);
     for(var i=lookbackMonths-1;i>=0;i--){
       var d=new Date(today.getFullYear(), today.getMonth()-i, 1);
       if(startMonth && d<startMonth) continue;          // before this tenancy began
       var m=d.getMonth()+1, y=d.getFullYear();
-      var due=rentDueDate(p,m,y);
+      var due=effectiveDueDate(p,m,y);
       if(due>today) continue;                            // not due yet
       if(isRentPaid(p.unit,m,y)) continue;               // already paid
-      out.push({p:p, m:m, y:y, amount:rent, due:due, days:Math.round((today-due)/86400000)});
+      out.push({p:p, m:m, y:y, amount:rent, due:due, days:Math.round((today-due)/86400000), dueKnown:!!rentDueDate(p,m,y)});
     }
   });
   out.sort(function(a,b){ return b.days-a.days; });
   return out;
+}
+/* ---------- Accounting helpers ---------- */
+/* Security deposit parsed from the sheet's "SecurityCheque" free text, e.g. "2000 cheque" */
+function depositOf(p){
+  var s=String(p.security||'').trim();
+  if(!s || /^(no|none|nil|-)$/i.test(s)) return {amount:0, method:'None', raw:s};
+  var m=s.match(/([\d][\d,]*(?:\.\d+)?)/);
+  var amt=m?parseFloat(m[1].replace(/,/g,'')):0;
+  var method = /cheque|check|chq/i.test(s)?'Cheque' : /cash/i.test(s)?'Cash'
+             : /transfer|bank/i.test(s)?'Bank transfer' : (amt?'Other':'None');
+  return {amount:amt, method:method, raw:s};
+}
+function depositsHeld(){ return DB.properties.filter(isOccupied).reduce(function(s,p){return s+depositOf(p).amount;},0); }
+
+/* Statement of account for one tenant: rent charged vs paid, month by month */
+function tenantLedger(p, months){
+  months=months||12;
+  var today=new Date(); today.setHours(0,0,0,0);
+  var startM = tenancyStartMonth(p);
+  var rows=[], charged=0, paidTot=0;
+  for(var i=months-1;i>=0;i--){
+    var d=new Date(today.getFullYear(), today.getMonth()-i, 1);
+    if(startM && d<startM) continue;
+    var m=d.getMonth()+1, y=d.getFullYear();
+    var due=effectiveDueDate(p,m,y);
+    if(due>today) continue;                        // not yet chargeable
+    var rent=Number(p.tenantRent)||0;
+    var recs=DB.rentRecords.filter(function(r){ return r.month===m && r.year===y && sameUnit(r.unit,p.unit); });
+    var got=recs.reduce(function(s,r){ return s+(Number(r.amount)||0); },0);
+    charged+=rent; paidTot+=got;
+    rows.push({m:m,y:y,due:due,rent:rent,paid:got,recs:recs,balance:rent-got});
+  }
+  return {rows:rows, charged:charged, paid:paidTot, balance:charged-paidTot};
+}
+
+/* Receivables aging per tenant: 1-30 / 31-60 / 61-90 / 90+ days overdue */
+function agingReport(months){
+  var arr=arrearsList(months||6), by={};
+  arr.forEach(function(x){
+    var k=x.p.id;
+    if(!by[k]) by[k]={p:x.p,b30:0,b60:0,b90:0,b90p:0,total:0,oldest:0,months:0};
+    var t=by[k]; t.total+=x.amount; t.months++; if(x.days>t.oldest) t.oldest=x.days;
+    if(x.days<=30) t.b30+=x.amount; else if(x.days<=60) t.b60+=x.amount;
+    else if(x.days<=90) t.b90+=x.amount; else t.b90p+=x.amount;
+  });
+  return Object.keys(by).map(function(k){return by[k];}).sort(function(a,b){return b.oldest-a.oldest;});
+}
+/* Rent falling due within the next N days (not yet paid) */
+function upcomingDue(days){
+  var today=new Date(); today.setHours(0,0,0,0);
+  var end=new Date(today.getTime()+days*86400000);
+  var out=[];
+  DB.properties.filter(isOccupied).forEach(function(p){
+    for(var i=0;i<=1;i++){
+      var d=new Date(today.getFullYear(), today.getMonth()+i, 1);
+      var m=d.getMonth()+1, y=d.getFullYear();
+      var due=rentDueDate(p,m,y); if(!due) continue;     // unknown start date — can't schedule it
+      if(due>=today && due<=end && !isRentPaid(p.unit,m,y))
+        out.push({p:p,m:m,y:y,due:due,amount:Number(p.tenantRent)||0,inDays:Math.round((due-today)/86400000)});
+    }
+  });
+  return out.sort(function(a,b){return a.due-b.due;});
 }
 function expiringList(days){
   return DB.properties.filter(isOccupied).map(function(p){ return {p:p, dl:daysUntil(p.contractTo)}; })
@@ -311,6 +399,7 @@ var NAV = [
   {id:'documents', label:'Documents', icon:'folder', roles:['admin','agent','accountant']},
   {sep:'Money'},
   {id:'rent', label:'Rent Payments', icon:'cash', roles:['admin','agent','accountant']},
+  {id:'accounting', label:'Accounting', icon:'doc', roles:['admin','accountant']},
   {id:'pnl', label:'Profit & Loss', icon:'trend', roles:['admin','accountant']},
   {id:'finance', label:'Finance', icon:'wallet', roles:['admin','accountant']},
   {id:'debts', label:'Debts & Dues', icon:'hand', roles:['admin','accountant']},
@@ -367,6 +456,7 @@ var TITLES = {
   contracts:['Contracts','Tenancy agreements & renewals'],
   documents:['Documents','Files, IDs & contact directory'],
   rent:['Rent Payments','Collection & rent roll'],
+  accounting:['Accounting','Management dashboard & registers'],
   pnl:['Profit & Loss','Full accounting statement'],
   finance:['Finance','Income, expenses & profit'],
   debts:['Debts & Dues','Receivables & payables'],
@@ -379,7 +469,8 @@ function renderView(){
   renderNav();
   var host=$('#view');
   var fn = ({dashboard:viewDashboard, properties:viewProperties, tenants:viewTenants, contracts:viewContracts,
-    documents:viewDocuments, rent:viewRent, pnl:viewPnl, finance:viewFinance, debts:viewDebts, tasks:viewTasks, settings:viewSettings})[STATE.view];
+    documents:viewDocuments, rent:viewRent, accounting:viewAccounting, pnl:viewPnl, finance:viewFinance,
+    debts:viewDebts, tasks:viewTasks, settings:viewSettings})[STATE.view];
   host.innerHTML = fn ? fn() : '';
   if(fn && fn.after) fn.after();
   wireView();
@@ -458,7 +549,7 @@ function viewDashboard(){
       var cls = x.days>30?'red':x.days>7?'red':'gold';
       return '<div class="lrow"><div class="av '+(x.days>7?'tint-red':'tint-gold')+'">'+esc((x.p.tenantName||'?')[0].toUpperCase())+'</div>'+
         '<div class="gr"><b>'+esc(x.p.unit)+' · '+esc(x.p.tenantName)+'</b>'+
-        '<span>'+MONTHS[x.m]+' '+x.y+' · was due '+x.due.getDate()+' '+MONTHS[x.m]+'</span></div>'+
+        '<span>'+MONTHS[x.m]+' '+x.y+' · '+(x.dueKnown?('was due '+x.due.getDate()+' '+MONTHS[x.m]):'month ended, still unpaid')+'</span></div>'+
         '<span class="chip '+cls+'">'+x.days+'d late</span>'+
         '<span class="amt neg" style="min-width:92px;text-align:right">'+money(x.amount)+'</span>'+
         (tc?'<button class="btn sm" data-remind-arrear="'+esc(x.p.unit)+'::'+x.m+'::'+x.y+'" title="WhatsApp reminder">'+icon('whatsapp')+'</button>':'')+
@@ -719,9 +810,20 @@ function renewContract(p){
   }, {submitText:'Save Renewal'});
 }
 
-/* ---------- RENT ---------- */
-function rentDueDay(p){ var d=parseDate(p.contractFrom); return d?d.getDate():1; }
-function rentDueDate(p, month, year){ var day=rentDueDay(p); var dim=new Date(year, month, 0).getDate(); return new Date(year, month-1, Math.min(day, dim)); }
+/* ---------- RENT ----------
+   Rent is due on the same day of each month as the tenancy start (TContractFrom).
+   If TContractFrom is blank we do NOT invent a day — the date shows as "not set",
+   and for overdue maths we fall back to month-end so nobody is chased too early. */
+function rentDueDay(p){ var d=parseDate(p.contractFrom); return d?d.getDate():null; }
+function rentDueDate(p, month, year){
+  var day=rentDueDay(p); if(day===null) return null;
+  var dim=new Date(year, month, 0).getDate();
+  return new Date(year, month-1, Math.min(day, dim));
+}
+/* Conservative date used for "is it late?" — never earlier than the real due date. */
+function effectiveDueDate(p, month, year){
+  return rentDueDate(p, month, year) || new Date(year, month, 0); // month-end
+}
 function viewRent(){
   var f=STATE.filters.rent||(STATE.filters.rent={month:curMonth(),year:curYear()});
   if(!f.roll) f.roll='all';
@@ -758,16 +860,29 @@ function viewRent(){
     '<span class="sub">'+Object.keys(paidUnits).length+' of '+occ.length+' paid</span>'+
     '<div class="right"><div class="seg" data-seg="rentroll">'+segBtns([['all','All ('+rows.length+')'],['unpaid','Unpaid ('+unpaidRows.length+')'],['paid','Paid ('+(rows.length-unpaidRows.length)+')']], f.roll)+'</div></div></div>';
   if(unpaidRows.length) html+='<div class="chip red" style="margin-bottom:12px">'+icon('alert')+' '+unpaidRows.length+' unpaid · '+money(unpaidTotal)+' outstanding this month</div>';
+  var noStart=occ.filter(function(p){ return rentDueDay(p)===null; });
+  if(noStart.length) html+='<div class="card pad" style="background:#fffaf0;border-color:#f0d9a8;box-shadow:none;margin-bottom:14px">'+
+    '<div class="prop-row" style="font-size:12.5px;color:#8a5b12;align-items:flex-start">'+icon('alert')+
+    '<span><b>'+noStart.length+' unit'+(noStart.length>1?'s have':' has')+' no <code>TContractFrom</code> in the sheet</b>, so the exact rent day is unknown: '+
+    noStart.map(function(p){return '<b>'+esc(p.unit)+'</b>';}).join(', ')+
+    '. Until it is filled in, rent is only treated as late after month-end. Click “Set start date” on the row, or fill <code>TContractFrom</code> in your Table tab.</span></div></div>';
   if(!shown.length) html+=emptyState(f.roll==='unpaid'?'Everyone has paid for '+MONTHS[f.month]+' 🎉':'No units to show');
   else html+='<div class="table-wrap" style="border:none"><table><thead><tr><th>Unit</th><th>Tenant</th><th class="num">Rent</th><th>Rent due</th><th class="num">Paid</th><th>Status</th><th></th></tr></thead><tbody>'+
-    shown.map(function(x){ var p=x.p, r=x.r; var due=rentDueDate(p,f.month,f.year); var od=daysUntil(due); var overdue=!r && od<0; var tc=phoneLinks(p.tenantContact);
+    shown.map(function(x){ var p=x.p, r=x.r;
+      var due=rentDueDate(p,f.month,f.year);            // null when TContractFrom is blank
+      var eff=effectiveDueDate(p,f.month,f.year);
+      var od=daysUntil(eff); var overdue=!r && od<0; var tc=phoneLinks(p.tenantContact);
       var status = r ? '<span class="chip green">Paid '+fmtDate(r.date)+'</span>'
         : overdue ? '<span class="chip red">Overdue '+Math.abs(od)+'d</span>'
-        : '<span class="chip gold">Due '+due.getDate()+' '+MONTHS[f.month]+'</span>';
+        : due ? '<span class="chip gold">Due '+due.getDate()+' '+MONTHS[f.month]+'</span>'
+        : '<span class="chip grey">Unpaid</span>';
+      var dueCell = due
+        ? ('<b>'+due.getDate()+' '+MONTHS[f.month]+' '+f.year+'</b><div class="text-muted" style="font-size:10.5px">from '+fmtDate(p.contractFrom)+'</div>')
+        : '<button class="btn sm" data-set-start="'+esc(p.id)+'" style="color:#c8801a;border-color:#f0d9a8" title="TContractFrom is empty in the sheet">'+icon('alert')+'Set start date</button>';
       return '<tr'+(overdue?' style="background:#fdf1f0"':'')+'><td><span class="u-code">'+esc(p.unit)+'</span></td>'+
         '<td><b style="color:var(--ink)">'+esc(p.tenantName)+'</b>'+(tc?'<div class="text-muted" style="font-size:11px">'+tc.display+'</div>':'')+'</td>'+
         '<td class="num">'+money(p.tenantRent)+'</td>'+
-        '<td>'+due.getDate()+' '+MONTHS[f.month]+' '+f.year+'</td>'+
+        '<td>'+dueCell+'</td>'+
         '<td class="num">'+(r?money(r.amount):'—')+'</td>'+
         '<td>'+status+'</td>'+
         '<td class="right" style="white-space:nowrap">'+
@@ -779,10 +894,12 @@ function viewRent(){
   // full history
   var hist=DB.rentRecords.slice().sort(function(a,b){return (parseDate(b.date)||0)-(parseDate(a.date)||0);}).slice(0,40);
   html+='<div class="card pad mt"><div class="card-h"><h3>Payment History</h3><span class="sub">Latest 40 records · '+DB.rentRecords.length+' total</span></div>'+
-    '<div class="table-wrap" style="border:none"><table><thead><tr><th>Date</th><th>Unit</th><th>Period</th><th class="num">Amount</th><th class="num">Profit</th>'+(STATE.user.role!=='accountant'?'<th></th>':'')+'</tr></thead><tbody>'+
+    '<div class="table-wrap" style="border:none"><table><thead><tr><th>Date</th><th>Unit</th><th>Period</th><th>Method</th><th class="num">Amount</th><th class="num">Profit</th><th></th></tr></thead><tbody>'+
     hist.map(function(r){ return '<tr><td>'+fmtDate(r.date)+'</td><td><span class="u-code">'+esc(r.unit)+'</span></td><td>'+MONTHS[r.month]+' '+r.year+'</td>'+
+      '<td>'+(r.method?'<span class="chip grey">'+esc(r.method)+'</span>':'<span class="text-muted">—</span>')+'</td>'+
       '<td class="num pos">'+money(r.amount)+'</td><td class="num '+(recordProfit(r)<0?'neg':'')+'">'+money(recordProfit(r))+'</td>'+
-      (STATE.user.role!=='accountant'?'<td class="right"><button class="btn sm ghost" data-del-rent="'+esc(r.id)+'" style="color:var(--red)">'+icon('trash')+'</button></td>':'')+'</tr>';
+      '<td class="right" style="white-space:nowrap"><button class="btn sm ghost" data-receipt="'+esc(r.id)+'" title="Receipt">'+icon('doc')+'</button>'+
+      (STATE.user.role!=='accountant'?'<button class="btn sm ghost" data-del-rent="'+esc(r.id)+'" style="color:var(--red)">'+icon('trash')+'</button>':'')+'</td></tr>';
     }).join('')+'</tbody></table></div></div>';
   return html;
 }
@@ -795,23 +912,37 @@ function recordRent(unit){
     {name:'unit',label:'Unit',type:'select',value:startUnit,options:units,required:true,full:true},
     {name:'amount',label:'Amount Received (AED)',type:'number',value:p0?p0.tenantRent:'',required:true},
     {name:'maintenance',label:'Maintenance (AED)',type:'number',value:p0?(p0.maintenance||0):0},
+    {name:'method',label:'Payment Method',type:'select',value:'Cash',options:['Cash','Bank transfer','Cheque','Card','Online','Other']},
     {name:'date',label:'Payment Date',type:'date',value:todayISO(),required:true},
     {name:'month',label:'Month',type:'select',value:f.month,options:MONTHS.slice(1).map(function(mn,i){return {value:i+1,label:mn};})},
     {name:'year',label:'Year',type:'number',value:f.year}
   ], function(data){
     var prop=getProp(data.unit);
     var rec={ id:uid('r'), unit:data.unit, amount:+data.amount||0, date:data.date, month:+data.month, year:+data.year,
-      maintenance:+data.maintenance||0, ownership:prop?prop.ownership:'Personnel' };
+      maintenance:+data.maintenance||0, method:data.method||'', ownership:prop?prop.ownership:'Personnel' };
     rec.profit=(rec.amount)-(prop?Number(prop.ownerRent)||0:0)-(rec.maintenance);
     DB.rentRecords.push(rec); save(); closeModal(); toast('Payment recorded','ok'); renderView();
     syncWrite([{action:'append', sheet:'RentRecords', idCol:'ID', row:{ StudioId:rec.unit, PaymentDate:toSheetDate(rec.date),
-      Amount:rec.amount, Ownership:rec.ownership, Month:rec.month, Year:rec.year, Maintenance:rec.maintenance, Profit:rec.profit }}], {appended:{obj:rec, prefix:'r'}});
+      Amount:rec.amount, Ownership:rec.ownership, Month:rec.month, Year:rec.year, Maintenance:rec.maintenance,
+      Profit:rec.profit, Method:rec.method }}], {appended:{obj:rec, prefix:'r'}});
   }, {submitText:'Save Payment'});
   // Auto-load the expected rent from the Table when the unit changes
   var sel=ov.querySelector('[name="unit"]'), amt=ov.querySelector('[name="amount"]'), mnt=ov.querySelector('[name="maintenance"]');
   var lbl=amt.closest('.field').querySelector('label');
   function fill(){ var pr=getProp(sel.value); if(pr){ amt.value=pr.tenantRent||''; if(mnt) mnt.value=pr.maintenance||0; if(lbl) lbl.innerHTML='Amount Received (AED) * <span style="color:var(--muted);font-weight:600">· expected '+money(pr.tenantRent||0)+'</span>'; } }
   sel.addEventListener('change', fill); fill();
+}
+
+/* Quick fix for a missing tenancy start date — writes TContractFrom back to the sheet */
+function setContractStart(p){
+  formModal('Tenancy start date · '+p.unit, [
+    {name:'contractFrom',label:'Contract start (TContractFrom)',type:'date',value:toDateInput(p.contractFrom),required:true,full:true}
+  ], function(data){
+    p.contractFrom=data.contractFrom; save(); closeModal();
+    toast('Rent day set to the '+parseDate(data.contractFrom).getDate()+'','ok'); renderView();
+    syncWrite([{action:'upsert', sheet:'Table', keyCol:'S_No', key:String(p.id).replace(/^p/,''),
+      row:{ TContractFrom: toSheetDate(data.contractFrom) }}]);
+  }, {submitText:'Save start date'});
 }
 
 /* ---------- WhatsApp reminders ---------- */
@@ -919,6 +1050,515 @@ function flyerHTML(items, opts){
 }
 
 /* ============================================================
+   ACCOUNTING — management dashboard & registers
+   ============================================================ */
+function viewAccounting(){
+  var f=STATE.filters.acc||(STATE.filters.acc={tab:'overview'});
+  var html='<div class="toolbar"><div class="seg" data-seg="acctab">'+segBtns([
+      ['overview','Overview'],['receivables','Receivables'],['deposits','Deposits'],
+      ['cheques','Cheques'],['utilities','Utilities'],['payables','Payables'],
+      ['calendar','Due Calendar'],['statements','Statements']], f.tab)+'</div>'+
+    '<div class="grow"></div><button class="btn" data-print>'+icon('doc')+'Print</button></div>';
+
+  var m=curMonth(), y=curYear();
+  var props=DB.properties, occ=props.filter(isOccupied), vac=props.length-occ.length;
+  var expected=occ.reduce(function(s,p){return s+(Number(p.tenantRent)||0);},0);
+  var collected=rentFor(m,y).reduce(function(s,r){return s+(Number(r.amount)||0);},0);
+  var outstanding=Math.max(expected-collected,0);
+  var rate=expected?Math.round(collected/expected*100):0;
+  var deposits=depositsHeld();
+  var monthTx=DB.transactions.filter(function(t){var d=parseDate(t.date);return d&&d.getFullYear()===y&&(d.getMonth()+1)===m;});
+  var monthExp=monthTx.filter(function(t){return t.type==='expense';}).reduce(function(s,t){return s+(Number(t.amount)||0);},0)
+              + DB.recurringExpenses.reduce(function(s,e){return s+(e.frequency==='Monthly'?Number(e.amount)||0:0);},0);
+  var netRental=rentFor(m,y).reduce(function(s,r){return s+recordProfit(r);},0)-monthExp;
+
+  if(f.tab==='overview'){
+    html+='<div class="card pad" style="background:linear-gradient(135deg,#16305B,#1d3d70);border:none">'+
+      '<div style="color:#bcd0ee;font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:14px">Management Dashboard · '+MONTHS[m]+' '+y+'</div>'+
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:1px;background:#ffffff20;border-radius:12px;overflow:hidden">'+
+      [['Total Studios',props.length,''],['Occupied',occ.length,''],['Vacant',vac,vac?'gold':''],
+       ['Rent Expected',money(expected),''],['Rent Collected',money(collected),'green'],
+       ['Outstanding',money(outstanding),outstanding?'red':''],['Collection %',rate+'%',rate>=90?'green':rate>=60?'gold':'red'],
+       ['Deposits Held',money(deposits),''],['Monthly Expenses',money(monthExp),''],
+       ['Net Rental Profit',money(netRental),netRental>=0?'green':'red']
+      ].map(function(k){
+        var col=k[2]==='green'?'#5ee0a8':k[2]==='red'?'#ff9b90':k[2]==='gold'?'#ffcd75':'#fff';
+        return '<div style="background:#16305B;padding:13px 14px">'+
+          '<div style="font-size:10.5px;color:#9fb6d8;font-weight:700;text-transform:uppercase;letter-spacing:.4px">'+k[0]+'</div>'+
+          '<div style="font-size:18px;font-weight:800;color:'+col+';margin-top:4px;line-height:1.15">'+k[1]+'</div></div>';
+      }).join('')+'</div></div>';
+
+    html+='<div class="grid cols-3 mt">'+
+      '<div class="card pad"><div class="card-h"><h3>Deposits Held</h3></div>'+
+        '<div style="font-size:24px;font-weight:800;color:var(--navy)">'+money(deposits)+'</div>'+
+        '<p class="text-muted" style="font-size:12px">Liability owed back to tenants — not income.</p>'+
+        '<button class="btn sm block" data-acc-tab="deposits">View register</button></div>'+
+      '<div class="card pad"><div class="card-h"><h3>Overdue</h3></div>'+
+        '<div style="font-size:24px;font-weight:800;color:var(--red)">'+money(arrearsList(6).reduce(function(s,x){return s+x.amount;},0))+'</div>'+
+        '<p class="text-muted" style="font-size:12px">Past due and still unpaid (6-month view).</p>'+
+        '<button class="btn sm block" data-acc-tab="receivables">Aging report</button></div>'+
+      '<div class="card pad"><div class="card-h"><h3>Due next 30 days</h3></div>'+
+        '<div style="font-size:24px;font-weight:800;color:var(--gold)">'+money(upcomingDue(30).reduce(function(s,x){return s+x.amount;},0))+'</div>'+
+        '<p class="text-muted" style="font-size:12px">Rent about to fall due.</p>'+
+        '<button class="btn sm block" data-acc-tab="calendar">Due calendar</button></div>'+
+    '</div>';
+    html+='<p class="text-muted mt" style="font-size:12px">Unit-by-unit profitability, landlord payouts and the full P&amp;L are in <b>Profit &amp; Loss</b>.</p>';
+  }
+
+  if(f.tab==='receivables'){
+    var lb=f.months||(f.months=6);
+    var aging=agingReport(lb);
+    var tot={b30:0,b60:0,b90:0,b90p:0,total:0};
+    aging.forEach(function(t){ tot.b30+=t.b30; tot.b60+=t.b60; tot.b90+=t.b90; tot.b90p+=t.b90p; tot.total+=t.total; });
+    html+='<div class="grid kpis">'+
+      kpi({icon:'clock',tint:'tint-gold',val:money(tot.b30),lbl:'1–30 days'})+
+      kpi({icon:'alert',tint:'tint-red',val:money(tot.b60),lbl:'31–60 days'})+
+      kpi({icon:'alert',tint:'tint-red',val:money(tot.b90),lbl:'61–90 days'})+
+      kpi({icon:'alert',tint:'tint-red',val:money(tot.b90p),lbl:'Over 90 days'})+
+    '</div>';
+    html+='<div class="card pad mt"><div class="card-h"><h3>Accounts Receivable Aging</h3><span class="sub">'+aging.length+' tenants · '+money(tot.total)+' outstanding</span>'+
+      '<div class="right"><select class="mini" data-acc-months>'+[3,6,12].map(function(n){return '<option value="'+n+'"'+(lb===n?' selected':'')+'>Last '+n+' months</option>';}).join('')+'</select></div></div>'+
+      '<div class="card pad" style="background:var(--navy-50);border-color:#dbe6f7;margin-bottom:14px;box-shadow:none"><div class="prop-row" style="font-size:12px;color:var(--navy);align-items:flex-start">'+icon('alert')+
+      '<span>Arrears are worked out from months that have <b>no matching row in RentRecords</b>. If a past payment was collected but never entered in the sheet, it will appear here as debt — check the tenant statement before chasing.</span></div></div>';
+    if(!aging.length) html+=emptyState('No receivables outstanding 🎉');
+    else html+='<div class="table-wrap" style="border:none"><table><thead><tr><th>Tenant</th><th>Unit</th><th class="num">1–30d</th><th class="num">31–60d</th><th class="num">61–90d</th><th class="num">90+d</th><th class="num">Total</th><th>Oldest</th><th></th></tr></thead><tbody>'+
+      aging.map(function(t){ return '<tr'+(t.oldest>60?' style="background:#fdf1f0"':'')+'>'+
+        '<td><b style="color:var(--ink)">'+esc(t.p.tenantName)+'</b></td><td><span class="u-code">'+esc(t.p.unit)+'</span></td>'+
+        '<td class="num">'+(t.b30?money(t.b30):'—')+'</td><td class="num">'+(t.b60?money(t.b60):'—')+'</td>'+
+        '<td class="num">'+(t.b90?money(t.b90):'—')+'</td><td class="num '+(t.b90p?'neg':'')+'">'+(t.b90p?money(t.b90p):'—')+'</td>'+
+        '<td class="num neg"><b>'+money(t.total)+'</b></td>'+
+        '<td><span class="chip '+(t.oldest>60?'red':t.oldest>30?'gold':'grey')+'">'+t.oldest+'d</span></td>'+
+        '<td class="right"><button class="btn sm" data-statement="'+esc(t.p.id)+'">Statement</button></td></tr>'; }).join('')+
+      '<tr style="background:var(--navy-50)"><td colspan="2"><b>TOTAL</b></td><td class="num"><b>'+money(tot.b30)+'</b></td><td class="num"><b>'+money(tot.b60)+'</b></td>'+
+      '<td class="num"><b>'+money(tot.b90)+'</b></td><td class="num"><b>'+money(tot.b90p)+'</b></td><td class="num neg"><b>'+money(tot.total)+'</b></td><td colspan="2"></td></tr>'+
+      '</tbody></table></div>';
+    html+='</div>';
+  }
+
+  if(f.tab==='deposits'){
+    var reg=DB.properties.filter(isOccupied).map(function(p){ return {p:p, d:depositOf(p)}; });
+    var held=reg.reduce(function(s,x){return s+x.d.amount;},0);
+    var missing=reg.filter(function(x){return !x.d.amount;});
+    html+='<div class="grid kpis">'+
+      kpi({icon:'key',tint:'tint-navy',val:money(held),lbl:'Total deposits held (liability)'})+
+      kpi({icon:'users',tint:'tint-green',val:reg.filter(function(x){return x.d.amount;}).length,lbl:'Tenants with a deposit'})+
+      kpi({icon:'alert',tint:'tint-red',val:missing.length,lbl:'No deposit recorded'})+
+      kpi({icon:'wallet',tint:'tint-gold',val:money(reg.length?held/reg.filter(function(x){return x.d.amount;}).length||0:0),lbl:'Average deposit'})+
+    '</div>';
+    html+='<div class="card pad mt"><div class="card-h"><h3>Security Deposit Register</h3><span class="sub">held as a liability until refunded</span></div>'+
+      '<div class="table-wrap" style="border:none"><table><thead><tr><th>Tenant</th><th>Unit</th><th class="num">Deposit</th><th>Method</th><th>Monthly Rent</th><th>Contract Ends</th><th>As recorded</th></tr></thead><tbody>'+
+      reg.map(function(x){ var st=contractStatus(x.p);
+        return '<tr'+(!x.d.amount?' style="background:#fffaf0"':'')+'><td><b style="color:var(--ink)">'+esc(x.p.tenantName)+'</b></td>'+
+        '<td><span class="u-code">'+esc(x.p.unit)+'</span></td>'+
+        '<td class="num '+(x.d.amount?'':'text-muted')+'">'+(x.d.amount?money(x.d.amount):'none')+'</td>'+
+        '<td><span class="chip '+(x.d.method==='Cheque'?'blue':x.d.method==='Cash'?'green':'grey')+'">'+esc(x.d.method)+'</span></td>'+
+        '<td class="num">'+money(x.p.tenantRent)+'</td>'+
+        '<td>'+fmtDate(x.p.contractTo)+' '+statusChip(st)+'</td>'+
+        '<td class="text-muted">'+esc(x.d.raw||'—')+'</td></tr>'; }).join('')+
+      '</tbody></table></div>'+
+      (missing.length?'<div class="chip gold mt-s">'+icon('alert')+' '+missing.length+' tenant(s) have no deposit recorded — add it in the unit\'s Security field</div>':'')+
+    '</div>';
+  }
+
+  /* ---------- POST-DATED CHEQUE REGISTER ---------- */
+  if(f.tab==='cheques'){
+    if(!DB.cheques.length && !tabReady('Cheques')) return html+setupNotice('Cheques');
+    var today=new Date(); today.setHours(0,0,0,0);
+    var chq=DB.cheques.slice().sort(function(a,b){ return (parseDate(a.chequeDate)||9e15)-(parseDate(b.chequeDate)||9e15); });
+    var pend=chq.filter(function(c){return /pending|deposited/i.test(c.status);});
+    var soon=pend.filter(function(c){ var d=daysUntil(c.chequeDate); return d!==null && d<=7; });
+    var bounced=chq.filter(function(c){return /bounce|return/i.test(c.status);});
+    var secHeld=chq.filter(function(c){return /security/i.test(c.purpose) && !/cleared|bounce|return/i.test(c.status);});
+    html+='<div class="grid kpis">'+
+      kpi({icon:'doc',tint:'tint-navy',val:money(pend.reduce(function(s,c){return s+c.amount;},0)),lbl:'Cheques on hand ('+pend.length+')'})+
+      kpi({icon:'clock',tint:'tint-gold',val:soon.length,lbl:'To bank within 7 days'})+
+      kpi({icon:'alert',tint:'tint-red',val:money(bounced.reduce(function(s,c){return s+c.amount;},0)),lbl:'Bounced ('+bounced.length+')'})+
+      kpi({icon:'key',tint:'tint-green',val:money(secHeld.reduce(function(s,c){return s+c.amount;},0)),lbl:'Security cheques held'})+
+    '</div>';
+    if(soon.length) html+='<div class="chip gold mt">'+icon('alert')+' '+soon.length+' cheque(s) reach their date within 7 days — bank them on time</div>';
+    html+='<div class="card pad mt"><div class="card-h"><h3>Post-Dated Cheque Register</h3><span class="sub">'+chq.length+' cheques</span>'+
+      '<div class="right"><button class="btn sm primary" data-add-cheque>'+icon('plus')+'Add cheque</button></div></div>';
+    if(!chq.length) html+=emptyState('No cheques recorded yet','Add the post-dated cheques you are holding');
+    else html+='<div class="table-wrap" style="border:none"><table><thead><tr><th>Cheque date</th><th>Tenant</th><th>Unit</th><th>Cheque #</th><th>Bank</th><th class="num">Amount</th><th>Purpose</th><th>Status</th><th></th></tr></thead><tbody>'+
+      chq.map(function(c){ var dl=daysUntil(c.chequeDate); var live=/pending|deposited/i.test(c.status);
+        var cls=/cleared/i.test(c.status)?'green':/bounce|return/i.test(c.status)?'red':/deposited/i.test(c.status)?'blue':'gold';
+        return '<tr'+(/bounce|return/i.test(c.status)?' style="background:#fdf1f0"':'')+'>'+
+          '<td><b>'+fmtDate(c.chequeDate)+'</b>'+(live&&dl!==null?'<div class="text-muted" style="font-size:10.5px">'+(dl<0?Math.abs(dl)+'d ago':dl===0?'today':'in '+dl+'d')+'</div>':'')+'</td>'+
+          '<td>'+esc(c.tenant||'—')+'</td><td><span class="u-code">'+esc(c.unit||'—')+'</span></td>'+
+          '<td>'+esc(c.chequeNo||'—')+'</td><td>'+esc(c.bank||'—')+'</td>'+
+          '<td class="num">'+money(c.amount)+'</td>'+
+          '<td><span class="chip grey">'+esc(c.purpose)+'</span></td>'+
+          '<td><span class="chip '+cls+'">'+esc(c.status)+'</span></td>'+
+          '<td class="right" style="white-space:nowrap">'+
+            (live?'<button class="btn sm green" data-chq-clear="'+esc(c.id)+'" title="Mark cleared">'+icon('check')+'</button> '+
+                  '<button class="btn sm red" data-chq-bounce="'+esc(c.id)+'" title="Mark bounced">'+icon('alert')+'</button> ':'')+
+            '<button class="btn sm ghost" data-chq-edit="'+esc(c.id)+'">'+icon('edit')+'</button></td></tr>';
+      }).join('')+'</tbody></table></div>';
+    html+='</div>';
+  }
+
+  /* ---------- UTILITIES PER UNIT ---------- */
+  if(f.tab==='utilities'){
+    if(!DB.utilities.length && !tabReady('Utilities')) return html+setupNotice('Utilities');
+    var ut=DB.utilities.slice().sort(function(a,b){ return (parseDate(b.billDate)||0)-(parseDate(a.billDate)||0); });
+    var thisMo=ut.filter(function(u){ return u.month===m && u.year===y; });
+    var unpaidU=ut.filter(function(u){ return !/paid/i.test(u.status); });
+    var recoverable=ut.filter(function(u){ return u.recoverable && u.recovered<u.amount; });
+    var companyCost=thisMo.filter(function(u){ return !u.recoverable; }).reduce(function(s,u){return s+u.amount;},0);
+    html+='<div class="grid kpis">'+
+      kpi({icon:'wallet',tint:'tint-navy',val:money(thisMo.reduce(function(s,u){return s+u.amount;},0)),lbl:'Utilities · '+MONTHS[m]+' '+y})+
+      kpi({icon:'alert',tint:'tint-red',val:money(unpaidU.reduce(function(s,u){return s+u.amount;},0)),lbl:'Unpaid bills ('+unpaidU.length+')'})+
+      kpi({icon:'hand',tint:'tint-gold',val:money(recoverable.reduce(function(s,u){return s+(u.amount-u.recovered);},0)),lbl:'Recoverable from tenants'})+
+      kpi({icon:'trend',tint:'tint-purple',val:money(companyCost),lbl:'Company-borne this month'})+
+    '</div>';
+    // per-unit summary
+    var byU={}; ut.forEach(function(u){ var k=u.unit||'(unallocated)'; if(!byU[k]) byU[k]={unit:k,total:0,n:0};
+      byU[k].total+=u.amount; byU[k].n++; });
+    var uRows=Object.keys(byU).map(function(k){return byU[k];}).sort(function(a,b){return b.total-a.total;});
+    html+='<div class="card pad mt"><div class="card-h"><h3>Utility Cost by Unit</h3><span class="sub">all time</span></div>'+
+      (uRows.length? uRows.slice(0,8).map(function(r){ var mx=uRows[0].total||1;
+        return '<div style="margin:10px 0"><div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:5px"><b>'+esc(r.unit)+'</b><span class="num">'+money(r.total)+' <span class="text-muted">('+r.n+' bills)</span></span></div>'+
+        '<div class="bar"><i style="width:'+Math.max(r.total/mx*100,2)+'%;background:var(--purple)"></i></div></div>'; }).join('')
+        : emptyState('No utility bills yet'))+'</div>';
+    html+='<div class="card pad mt"><div class="card-h"><h3>Utility Bills</h3><span class="sub">'+ut.length+' bills</span>'+
+      '<div class="right"><button class="btn sm primary" data-add-util>'+icon('plus')+'Add bill</button></div></div>';
+    if(!ut.length) html+=emptyState('No bills recorded','Add electricity, water, internet or gas bills per unit');
+    else html+='<div class="table-wrap" style="border:none"><table><thead><tr><th>Bill date</th><th>Unit</th><th>Type</th><th>Provider</th><th>Period</th><th class="num">Amount</th><th>Borne by</th><th>Status</th><th></th></tr></thead><tbody>'+
+      ut.slice(0,60).map(function(u){ var paidU=/paid/i.test(u.status);
+        return '<tr'+(!paidU?' style="background:#fffaf0"':'')+'><td>'+fmtDate(u.billDate)+'</td>'+
+          '<td><span class="u-code">'+esc(u.unit||'—')+'</span></td><td>'+esc(u.type)+'</td>'+
+          '<td>'+esc(u.provider||'—')+'</td><td>'+(u.month?MONTHS[u.month]+' '+u.year:'—')+'</td>'+
+          '<td class="num">'+money(u.amount)+'</td>'+
+          '<td>'+(u.recoverable?'<span class="chip gold">Tenant</span>':'<span class="chip navy">Company</span>')+'</td>'+
+          '<td><span class="chip '+(paidU?'green':'red')+'">'+esc(u.status)+'</span></td>'+
+          '<td class="right" style="white-space:nowrap">'+(!paidU?'<button class="btn sm green" data-util-paid="'+esc(u.id)+'" title="Mark paid">'+icon('check')+'</button> ':'')+
+          '<button class="btn sm ghost" data-util-edit="'+esc(u.id)+'">'+icon('edit')+'</button></td></tr>';
+      }).join('')+'</tbody></table></div>';
+    html+='</div>';
+  }
+
+  /* ---------- SUPPLIERS & ACCOUNTS PAYABLE ---------- */
+  if(f.tab==='payables'){
+    if(!DB.invoices.length && !DB.suppliers.length && !tabReady('Invoices')) return html+setupNotice('Invoices');
+    var inv=DB.invoices.slice().sort(function(a,b){ return (parseDate(a.dueDate)||9e15)-(parseDate(b.dueDate)||9e15); });
+    var openInv=inv.filter(function(i){ return i.balance>0; });
+    var overdueInv=openInv.filter(function(i){ var d=daysUntil(i.dueDate); return d!==null && d<0; });
+    var due7=openInv.filter(function(i){ var d=daysUntil(i.dueDate); return d!==null && d>=0 && d<=7; });
+    html+='<div class="grid kpis">'+
+      kpi({icon:'wallet',tint:'tint-red',val:money(openInv.reduce(function(s,i){return s+i.balance;},0)),lbl:'Total payable ('+openInv.length+')'})+
+      kpi({icon:'alert',tint:'tint-red',val:money(overdueInv.reduce(function(s,i){return s+i.balance;},0)),lbl:'Overdue ('+overdueInv.length+')'})+
+      kpi({icon:'clock',tint:'tint-gold',val:money(due7.reduce(function(s,i){return s+i.balance;},0)),lbl:'Due within 7 days'})+
+      kpi({icon:'users',tint:'tint-navy',val:DB.suppliers.length,lbl:'Suppliers'})+
+    '</div>';
+    // supplier balances
+    var bySup={};
+    inv.forEach(function(i){ var k=i.supplier||'(unknown)'; if(!bySup[k]) bySup[k]={name:k,total:0,balance:0,n:0};
+      bySup[k].total+=i.total; bySup[k].balance+=i.balance; bySup[k].n++; });
+    var supRows=Object.keys(bySup).map(function(k){return bySup[k];}).sort(function(a,b){return b.balance-a.balance;});
+    html+='<div class="grid cols-2 mt">'+
+      '<div class="card pad"><div class="card-h"><h3>Supplier Balances</h3><div class="right"><button class="btn sm" data-add-supplier>'+icon('plus')+'Supplier</button></div></div>'+
+      (supRows.length? '<div class="table-wrap" style="border:none"><table><thead><tr><th>Supplier</th><th class="num">Invoices</th><th class="num">Billed</th><th class="num">Outstanding</th></tr></thead><tbody>'+
+        supRows.map(function(s2){ return '<tr><td><b>'+esc(s2.name)+'</b></td><td class="num">'+s2.n+'</td>'+
+        '<td class="num">'+money(s2.total)+'</td><td class="num '+(s2.balance>0?'neg':'pos')+'"><b>'+money(s2.balance)+'</b></td></tr>'; }).join('')+
+        '</tbody></table></div>' : emptyState('No supplier invoices yet'))+'</div>'+
+      '<div class="card pad"><div class="card-h"><h3>Suppliers</h3></div>'+
+      (DB.suppliers.length? DB.suppliers.map(function(s3){
+        return '<div class="lrow"><div class="av tint-navy">'+esc((s3.name||'?')[0].toUpperCase())+'</div>'+
+        '<div class="gr"><b>'+esc(s3.name)+'</b><span>'+esc(s3.category||'—')+(s3.contact?' · '+esc(s3.contact):'')+'</span></div></div>';
+      }).join('') : emptyState('No suppliers','Add the companies you buy from'))+'</div>'+
+    '</div>';
+    html+='<div class="card pad mt"><div class="card-h"><h3>Supplier Invoices</h3><span class="sub">'+inv.length+' invoices</span>'+
+      '<div class="right"><button class="btn sm primary" data-add-invoice>'+icon('plus')+'Add invoice</button></div></div>';
+    if(!inv.length) html+=emptyState('No invoices recorded','Add supplier bills to track what you owe');
+    else html+='<div class="table-wrap" style="border:none"><table><thead><tr><th>Due</th><th>Supplier</th><th>Invoice #</th><th>Unit</th><th>Category</th><th class="num">Total</th><th class="num">Paid</th><th class="num">Balance</th><th>Status</th><th></th></tr></thead><tbody>'+
+      inv.map(function(i){ var dl=daysUntil(i.dueDate); var od=i.balance>0 && dl!==null && dl<0;
+        return '<tr'+(od?' style="background:#fdf1f0"':'')+'><td>'+fmtDate(i.dueDate)+
+          (od?'<div><span class="chip red">'+Math.abs(dl)+'d overdue</span></div>':'')+'</td>'+
+          '<td><b>'+esc(i.supplier||'—')+'</b></td><td>'+esc(i.invoiceNo||'—')+'</td>'+
+          '<td><span class="u-code">'+esc(i.unit||'—')+'</span></td><td>'+esc(i.category||'—')+'</td>'+
+          '<td class="num">'+money(i.total)+'</td><td class="num pos">'+money(i.paid)+'</td>'+
+          '<td class="num '+(i.balance>0?'neg':'pos')+'"><b>'+money(i.balance)+'</b></td>'+
+          '<td><span class="chip '+(i.balance<=0?'green':i.paid>0?'gold':'red')+'">'+esc(i.status)+'</span></td>'+
+          '<td class="right" style="white-space:nowrap">'+(i.balance>0?'<button class="btn sm green" data-inv-pay="'+esc(i.id)+'" title="Record payment">'+icon('cash')+'</button> ':'')+
+          '<button class="btn sm ghost" data-inv-edit="'+esc(i.id)+'">'+icon('edit')+'</button></td></tr>';
+      }).join('')+'</tbody></table></div>';
+    html+='</div>';
+  }
+
+  if(f.tab==='calendar'){
+    var up=upcomingDue(30);
+    html+='<div class="card pad"><div class="card-h"><h3>Rent Due Calendar</h3><span class="sub">next 30 days · '+money(up.reduce(function(s,x){return s+x.amount;},0))+' expected</span></div>';
+    if(!up.length) html+=emptyState('Nothing falls due in the next 30 days');
+    else html+='<div class="table-wrap" style="border:none"><table><thead><tr><th>Due date</th><th>In</th><th>Tenant</th><th>Unit</th><th class="num">Amount</th><th>Period</th><th></th></tr></thead><tbody>'+
+      up.map(function(x){ var tc=phoneLinks(x.p.tenantContact);
+        return '<tr><td><b>'+x.due.getDate()+' '+MONTHS[x.due.getMonth()+1]+'</b></td>'+
+        '<td><span class="chip '+(x.inDays<=3?'gold':'grey')+'">'+(x.inDays===0?'today':x.inDays+'d')+'</span></td>'+
+        '<td>'+esc(x.p.tenantName)+'</td><td><span class="u-code">'+esc(x.p.unit)+'</span></td>'+
+        '<td class="num">'+money(x.amount)+'</td><td>'+MONTHS[x.m]+' '+x.y+'</td>'+
+        '<td class="right">'+(tc?'<button class="btn sm" data-remind-arrear="'+esc(x.p.unit)+'::'+x.m+'::'+x.y+'" title="WhatsApp">'+icon('whatsapp')+'</button> ':'')+
+        '<button class="btn sm green" data-pay-unit="'+esc(x.p.unit)+'">'+icon('cash')+'</button></td></tr>'; }).join('')+
+      '</tbody></table></div>';
+    html+='</div>';
+  }
+
+  if(f.tab==='statements'){
+    html+='<div class="card pad"><div class="card-h"><h3>Tenant Statements of Account</h3><span class="sub">rent charged vs received</span></div>'+
+      '<div class="table-wrap" style="border:none"><table><thead><tr><th>Tenant</th><th>Unit</th><th class="num">Charged</th><th class="num">Received</th><th class="num">Balance</th><th class="num">Deposit</th><th></th></tr></thead><tbody>'+
+      DB.properties.filter(isOccupied).map(function(p){ var L=tenantLedger(p,12), d=depositOf(p);
+        return '<tr'+(L.balance>0?' style="background:#fdf1f0"':'')+'><td><b style="color:var(--ink)">'+esc(p.tenantName)+'</b></td>'+
+        '<td><span class="u-code">'+esc(p.unit)+'</span></td>'+
+        '<td class="num">'+money(L.charged)+'</td><td class="num pos">'+money(L.paid)+'</td>'+
+        '<td class="num '+(L.balance>0?'neg':'pos')+'"><b>'+money(L.balance)+'</b></td>'+
+        '<td class="num">'+money(d.amount)+'</td>'+
+        '<td class="right"><button class="btn sm" data-statement="'+esc(p.id)+'">Open</button></td></tr>'; }).join('')+
+      '</tbody></table></div></div>';
+  }
+  return html;
+}
+
+/* These registers live in sheet tabs that may not exist yet. */
+function tabReady(name){ return !!(DB.meta && DB.meta.tabsReady && DB.meta.tabsReady.indexOf(name)>=0); }
+function setupNotice(tab){
+  return '<div class="card pad" style="background:#fffaf0;border-color:#f0d9a8">'+
+    '<div class="card-h">'+icon('alert','')+'<h3 style="color:#8a5b12">One-time setup needed</h3></div>'+
+    '<p style="font-size:13px;margin-top:0">This register is stored in a <b>'+esc(tab)+'</b> tab in your Google Sheet, which doesn’t exist yet.</p>'+
+    '<ol style="font-size:13px;color:var(--ink-2);padding-left:18px;line-height:1.8;margin:0 0 14px">'+
+      '<li>Open your Google Sheet → <b>Extensions → Apps Script</b></li>'+
+      '<li>Make sure the latest <code>Code.gs</code> is pasted in, then <b>Save</b></li>'+
+      '<li>Pick the function <b>setupAccountingTabs</b> from the dropdown and click <b>Run</b></li>'+
+      '<li>Come back here and press <b>Sync</b></li>'+
+    '</ol>'+
+    '<p class="text-muted" style="font-size:12px;margin-bottom:0">It creates the <b>Cheques</b>, <b>Utilities</b>, <b>Suppliers</b> and <b>Invoices</b> tabs with the right columns. Your existing data is untouched.</p>'+
+    '<button class="btn primary mt-s" data-sync-now>'+icon('refresh')+'I\'ve done it — Sync now</button></div>';
+}
+
+/* ---------- Cheque register ---------- */
+function chequeFields(c){ c=c||{};
+  var units=DB.properties.map(function(p){return p.unit;});
+  return [
+    {name:'tenant',label:'Tenant',value:c.tenant,required:true},
+    {name:'unit',label:'Unit',type:'select',value:c.unit||units[0],options:units},
+    {name:'chequeNo',label:'Cheque number',value:c.chequeNo},
+    {name:'bank',label:'Bank',value:c.bank},
+    {name:'chequeDate',label:'Cheque date',type:'date',value:toDateInput(c.chequeDate),required:true},
+    {name:'amount',label:'Amount (AED)',type:'number',value:c.amount,required:true},
+    {name:'purpose',label:'Purpose',type:'select',value:c.purpose||'Rent',options:['Rent','Security','Other']},
+    {name:'status',label:'Status',type:'select',value:c.status||'Pending',options:['Pending','Deposited','Cleared','Bounced','Returned']},
+    {name:'notes',label:'Notes',type:'textarea',value:c.notes,full:true}
+  ];
+}
+function chequeRow(c, forAppend){
+  var row={ TenantName:c.tenant, Unit:c.unit, ChequeNo:c.chequeNo, Bank:c.bank,
+    ChequeDate:toSheetDate(c.chequeDate), Amount:c.amount, Purpose:c.purpose,
+    Status:c.status, DepositedDate:toSheetDate(c.depositedDate), Notes:c.notes };
+  if(!forAppend) row.ID=String(c.id).replace(/^cq/,'');
+  return row;
+}
+function addCheque(){ formModal('Add Post-Dated Cheque', chequeFields(), function(d){
+  var c={id:uid('cq'),tenant:d.tenant,unit:d.unit,chequeNo:d.chequeNo,bank:d.bank,chequeDate:d.chequeDate,
+    amount:+d.amount||0,purpose:d.purpose,status:d.status,depositedDate:'',notes:d.notes};
+  DB.cheques.push(c); save(); closeModal(); toast('Cheque added','ok'); renderView();
+  syncWrite([{action:'append', sheet:'Cheques', idCol:'ID', row:chequeRow(c,true)}], {appended:{obj:c, prefix:'cq'}});
+}, {lg:true, submitText:'Add cheque'}); }
+function editCheque(c){ formModal('Edit cheque · '+(c.chequeNo||c.tenant), chequeFields(c), function(d){
+  Object.assign(c,{tenant:d.tenant,unit:d.unit,chequeNo:d.chequeNo,bank:d.bank,chequeDate:d.chequeDate,
+    amount:+d.amount||0,purpose:d.purpose,status:d.status,notes:d.notes});
+  save(); closeModal(); toast('Saved','ok'); renderView();
+  var k=numKey(c.id,'cq'); if(k) syncWrite([{action:'upsert', sheet:'Cheques', keyCol:'ID', key:k, row:chequeRow(c)}]);
+}, {lg:true}); }
+function setChequeStatus(c, status){
+  c.status=status; if(status==='Cleared'||status==='Deposited') c.depositedDate=todayISO();
+  save(); toast('Cheque marked '+status.toLowerCase(), status==='Bounced'?'err':'ok'); renderView();
+  var k=numKey(c.id,'cq');
+  if(k) syncWrite([{action:'upsert', sheet:'Cheques', keyCol:'ID', key:k,
+    row:{Status:c.status, DepositedDate:toSheetDate(c.depositedDate)}}]);
+  if(status==='Bounced'){
+    confirmDialog('Cheque bounced — add '+money(c.amount)+' to '+c.tenant+' as money they owe you?', function(){
+      var d={id:uid('d'),person:c.tenant,type:'Receivable',amount:c.amount,paid:0,balance:c.amount,
+        date:todayISO(),dueDate:todayISO(),reason:'Bounced cheque '+(c.chequeNo||'')+' ('+c.unit+')',
+        status:'Active',lastPayment:'',history:''};
+      DB.debts.push(d); save(); toast('Added to Debts & Dues','ok'); renderView();
+      syncWrite([{action:'append', sheet:'DebtTracker', idCol:'ID', row:debtRow(d,true)}], {appended:{obj:d, prefix:'d'}});
+    }, true);
+  }
+}
+
+/* ---------- Utilities ---------- */
+function utilFields(u){ u=u||{};
+  var units=DB.properties.map(function(p){return p.unit;});
+  return [
+    {name:'unit',label:'Unit',type:'select',value:u.unit||units[0],options:units},
+    {name:'type',label:'Utility',type:'select',value:u.type||'Electricity',options:['Electricity','Water','Internet','Gas','Cooling','Waste','Other']},
+    {name:'provider',label:'Provider',value:u.provider,placeholder:'e.g. ADDC, Etisalat'},
+    {name:'amount',label:'Amount (AED)',type:'number',value:u.amount,required:true},
+    {name:'billDate',label:'Bill date',type:'date',value:toDateInput(u.billDate)||todayISO(),required:true},
+    {name:'month',label:'Period month',type:'select',value:u.month||curMonth(),options:MONTHS.slice(1).map(function(mn,i){return {value:i+1,label:mn};})},
+    {name:'year',label:'Period year',type:'number',value:u.year||curYear()},
+    {name:'status',label:'Status',type:'select',value:u.status||'Unpaid',options:['Unpaid','Paid']},
+    {name:'recoverable',label:'Charged back to tenant?',type:'select',value:u.recoverable?'Yes':'No',options:['No','Yes']},
+    {name:'notes',label:'Notes',type:'textarea',value:u.notes,full:true}
+  ];
+}
+function utilRow(u, forAppend){
+  var row={ Unit:u.unit, Type:u.type, Provider:u.provider, BillDate:toSheetDate(u.billDate),
+    Month:u.month, Year:u.year, Amount:u.amount, PaidBy:(u.recoverable?'Tenant':'Company'),
+    Status:u.status, Recoverable:(u.recoverable?'Yes':'No'), RecoveredAmount:u.recovered||0, Notes:u.notes };
+  if(!forAppend) row.ID=String(u.id).replace(/^ut/,'');
+  return row;
+}
+function addUtility(){ formModal('Add Utility Bill', utilFields(), function(d){
+  var u={id:uid('ut'),unit:d.unit,type:d.type,provider:d.provider,amount:+d.amount||0,billDate:d.billDate,
+    month:+d.month,year:+d.year,status:d.status,recoverable:d.recoverable==='Yes',recovered:0,
+    paidBy:d.recoverable==='Yes'?'Tenant':'Company',notes:d.notes};
+  DB.utilities.push(u); save(); closeModal(); toast('Bill added','ok'); renderView();
+  syncWrite([{action:'append', sheet:'Utilities', idCol:'ID', row:utilRow(u,true)}], {appended:{obj:u, prefix:'ut'}});
+}, {lg:true, submitText:'Add bill'}); }
+function editUtility(u){ formModal('Edit bill · '+u.unit+' '+u.type, utilFields(u), function(d){
+  Object.assign(u,{unit:d.unit,type:d.type,provider:d.provider,amount:+d.amount||0,billDate:d.billDate,
+    month:+d.month,year:+d.year,status:d.status,recoverable:d.recoverable==='Yes',notes:d.notes});
+  save(); closeModal(); toast('Saved','ok'); renderView();
+  var k=numKey(u.id,'ut'); if(k) syncWrite([{action:'upsert', sheet:'Utilities', keyCol:'ID', key:k, row:utilRow(u)}]);
+}, {lg:true}); }
+
+/* ---------- Suppliers & invoices ---------- */
+function addSupplier(){ formModal('Add Supplier', [
+  {name:'name',label:'Supplier name',required:true,full:true},
+  {name:'category',label:'Category',value:'',placeholder:'Maintenance, Furniture, Cleaning…'},
+  {name:'contact',label:'Contact'},
+  {name:'trn',label:'TRN (tax number)',full:true}
+], function(d){
+  var s2={id:uid('sp'),name:d.name,category:d.category,contact:d.contact,trn:d.trn,notes:''};
+  DB.suppliers.push(s2); save(); closeModal(); toast('Supplier added','ok'); renderView();
+  syncWrite([{action:'append', sheet:'Suppliers', idCol:'ID', row:{Name:s2.name,Category:s2.category,Contact:s2.contact,TRN:s2.trn}}], {appended:{obj:s2, prefix:'sp'}});
+}); }
+function invoiceFields(i){ i=i||{};
+  var sups=DB.suppliers.map(function(s2){return s2.name;});
+  var units=[''].concat(DB.properties.map(function(p){return p.unit;}));
+  return [
+    {name:'supplier',label:'Supplier',type:(sups.length?'select':'text'),value:i.supplier||sups[0],options:sups,required:true},
+    {name:'invoiceNo',label:'Invoice number',value:i.invoiceNo},
+    {name:'invoiceDate',label:'Invoice date',type:'date',value:toDateInput(i.invoiceDate)||todayISO(),required:true},
+    {name:'dueDate',label:'Due date',type:'date',value:toDateInput(i.dueDate)},
+    {name:'unit',label:'Unit (if for one studio)',type:'select',value:i.unit||'',options:units},
+    {name:'category',label:'Category',value:i.category,placeholder:'Maintenance, Furniture…'},
+    {name:'amount',label:'Amount before VAT',type:'number',value:i.amount,required:true},
+    {name:'vat',label:'VAT',type:'number',value:i.vat||0},
+    {name:'paid',label:'Already paid',type:'number',value:i.paid||0},
+    {name:'notes',label:'Notes',type:'textarea',value:i.notes,full:true}
+  ];
+}
+function invoiceRow(i, forAppend){
+  var row={ SupplierName:i.supplier, InvoiceNo:i.invoiceNo, InvoiceDate:toSheetDate(i.invoiceDate),
+    DueDate:toSheetDate(i.dueDate), Unit:i.unit, Category:i.category, Amount:i.amount, VAT:i.vat,
+    Total:i.total, PaidAmount:i.paid, Balance:i.balance, Status:i.status, Notes:i.notes };
+  if(!forAppend) row.ID=String(i.id).replace(/^inv/,'');
+  return row;
+}
+function recalcInvoice(i){
+  i.total=(Number(i.amount)||0)+(Number(i.vat)||0);
+  i.balance=Math.max(i.total-(Number(i.paid)||0),0);
+  i.status = i.balance<=0?'Paid' : (i.paid>0?'Partial':'Unpaid');
+  return i;
+}
+function addInvoice(){ formModal('Add Supplier Invoice', invoiceFields(), function(d){
+  var i=recalcInvoice({id:uid('inv'),supplier:d.supplier,invoiceNo:d.invoiceNo,invoiceDate:d.invoiceDate,
+    dueDate:d.dueDate,unit:d.unit,category:d.category,amount:+d.amount||0,vat:+d.vat||0,paid:+d.paid||0,notes:d.notes});
+  DB.invoices.push(i); save(); closeModal(); toast('Invoice added','ok'); renderView();
+  syncWrite([{action:'append', sheet:'Invoices', idCol:'ID', row:invoiceRow(i,true)}], {appended:{obj:i, prefix:'inv'}});
+}, {lg:true, submitText:'Add invoice'}); }
+function editInvoice(i){ formModal('Edit invoice '+(i.invoiceNo||''), invoiceFields(i), function(d){
+  Object.assign(i,{supplier:d.supplier,invoiceNo:d.invoiceNo,invoiceDate:d.invoiceDate,dueDate:d.dueDate,
+    unit:d.unit,category:d.category,amount:+d.amount||0,vat:+d.vat||0,paid:+d.paid||0,notes:d.notes});
+  recalcInvoice(i); save(); closeModal(); toast('Saved','ok'); renderView();
+  var k=numKey(i.id,'inv'); if(k) syncWrite([{action:'upsert', sheet:'Invoices', keyCol:'ID', key:k, row:invoiceRow(i)}]);
+}, {lg:true}); }
+function payInvoice(i){ formModal('Pay '+(i.supplier||'invoice'), [
+  {name:'amount',label:'Payment amount (AED)',type:'number',value:i.balance,required:true,full:true},
+  {name:'date',label:'Payment date',type:'date',value:todayISO(),full:true}
+], function(d){
+  i.paid=(Number(i.paid)||0)+(+d.amount||0); recalcInvoice(i);
+  save(); closeModal(); toast('Payment recorded','ok'); renderView();
+  var k=numKey(i.id,'inv');
+  if(k) syncWrite([{action:'upsert', sheet:'Invoices', keyCol:'ID', key:k,
+    row:{PaidAmount:i.paid, Balance:i.balance, Status:i.status}}]);
+}, {submitText:'Record payment'}); }
+
+/* Printable statement of account for one tenant */
+function openStatement(pid){
+  var p=DB.properties.filter(function(x){return x.id===pid;})[0]; if(!p) return;
+  var L=tenantLedger(p,12), d=depositOf(p), st=contractStatus(p);
+  var body='<div class="detail-grid" style="margin-bottom:14px">'+
+    '<div class="ditem"><div class="k">Tenant</div><div class="v">'+esc(p.tenantName)+'</div></div>'+
+    '<div class="ditem"><div class="k">Unit</div><div class="v">'+esc(p.unit)+'</div></div>'+
+    '<div class="ditem"><div class="k">Monthly Rent</div><div class="v">'+money(p.tenantRent)+'</div></div>'+
+    '<div class="ditem"><div class="k">Deposit Held</div><div class="v">'+money(d.amount)+' <span class="chip grey">'+esc(d.method)+'</span></div></div>'+
+    '<div class="ditem"><div class="k">Contract</div><div class="v">'+fmtDate(p.contractFrom)+' → '+fmtDate(p.contractTo)+' '+statusChip(st)+'</div></div>'+
+    '<div class="ditem"><div class="k">Rent due each month</div><div class="v">Day '+rentDueDay(p)+'</div></div></div>';
+  body+='<div class="table-wrap"><table><thead><tr><th>Period</th><th>Due</th><th class="num">Charged</th><th class="num">Received</th><th class="num">Balance</th><th></th></tr></thead><tbody>'+
+    L.rows.map(function(r){
+      return '<tr'+(r.balance>0?' style="background:#fdf1f0"':'')+'><td><b>'+MONTHS[r.m]+' '+r.y+'</b></td>'+
+      '<td>'+r.due.getDate()+' '+MONTHS[r.m]+'</td><td class="num">'+money(r.rent)+'</td>'+
+      '<td class="num pos">'+(r.paid?money(r.paid):'—')+'</td>'+
+      '<td class="num '+(r.balance>0?'neg':'')+'">'+(r.balance>0?money(r.balance):'0')+'</td>'+
+      '<td class="right">'+(r.recs.length?'<button class="btn sm ghost" data-receipt="'+esc(r.recs[0].id)+'">Receipt</button>':'')+'</td></tr>';
+    }).join('')+
+    '<tr style="background:var(--navy-50)"><td colspan="2"><b>TOTAL</b></td><td class="num"><b>'+money(L.charged)+'</b></td>'+
+    '<td class="num pos"><b>'+money(L.paid)+'</b></td><td class="num '+(L.balance>0?'neg':'pos')+'"><b>'+money(L.balance)+'</b></td><td></td></tr>'+
+    '</tbody></table></div>';
+  if(L.balance>0) body+='<div class="chip red mt">'+icon('alert')+' Outstanding balance '+money(L.balance)+'</div>';
+  openModal('Statement of Account · '+p.tenantName, body,
+    '<button class="btn" data-st-print>'+icon('doc')+'Print</button><button class="btn primary" data-st-close>Close</button>',
+    {lg:true, onOpen:function(ov){
+      ov.querySelector('[data-st-close]').onclick=closeModal;
+      ov.querySelector('[data-st-print]').onclick=function(){ window.print(); };
+      $$('[data-receipt]',ov).forEach(function(b){ b.onclick=function(){ openReceipt(b.getAttribute('data-receipt')); }; });
+    }});
+}
+
+/* Printable rent receipt */
+function openReceipt(rid){
+  var r=DB.rentRecords.filter(function(x){return x.id===rid;})[0]; if(!r){ toast('Payment not found','err'); return; }
+  var p=getProp(r.unit);
+  var no='RCPT-'+String(r.id).replace(/\D/g,'')+'-'+r.year;
+  var logo='<svg width="54" height="54" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg"><rect width="120" height="120" rx="27" fill="#16305B"/><path d="M28 52 L60 26 L92 52 L81 52 L60 35 L39 52 Z" fill="#E23B2E"/><text x="60" y="84" font-family="Arial" font-size="44" font-weight="800" fill="#fff" text-anchor="middle">SA</text></svg>';
+  var doc='<!DOCTYPE html><html><head><meta charset="utf-8"><title>Receipt '+no+'</title><style>'+
+    'body{font-family:Segoe UI,Arial,sans-serif;color:#16233b;padding:26px;max-width:640px;margin:0 auto}'+
+    '.hd{display:flex;align-items:center;gap:14px;border-bottom:3px solid #16305B;padding-bottom:12px}'+
+    '.hd h1{margin:0;font-size:17px;color:#16305B}.hd p{margin:2px 0 0;font-size:11.5px;color:#6b7a90}'+
+    '.t{margin-left:auto;text-align:right}.t b{font-size:19px;color:#E23B2E;letter-spacing:1px}'+
+    'table{width:100%;border-collapse:collapse;margin-top:18px;font-size:13.5px}'+
+    'td{padding:8px 0;border-bottom:1px solid #e6ebf3}td:last-child{text-align:right;font-weight:700}'+
+    '.amt{background:#eef3fb;padding:14px;border-radius:10px;margin-top:18px;display:flex;justify-content:space-between;align-items:center}'+
+    '.amt span{font-size:12px;color:#6b7a90;font-weight:700;text-transform:uppercase}.amt b{font-size:23px;color:#12a670}'+
+    '.ft{margin-top:26px;display:flex;justify-content:space-between;font-size:11.5px;color:#6b7a90}'+
+    '.sig{border-top:1px solid #9aa7bd;padding-top:5px;width:170px;text-align:center}'+
+    '@media print{.noprint{display:none}}</style></head><body>'+
+    '<div class="hd">'+logo+'<div><h1>'+esc(DB.meta.company||'SABIR AMIN REAL ESTATE LLC SPC')+'</h1><p>Rent Payment Receipt</p></div>'+
+    '<div class="t"><b>'+no+'</b><p style="margin:2px 0 0;font-size:11.5px;color:#6b7a90">'+fmtDate(r.date)+'</p></div></div>'+
+    '<table><tr><td>Received from</td><td>'+esc((p&&p.tenantName)||'—')+'</td></tr>'+
+    '<tr><td>Unit</td><td>'+esc(r.unit)+'</td></tr>'+
+    '<tr><td>Rent period</td><td>'+MONTHS[r.month]+' '+r.year+'</td></tr>'+
+    '<tr><td>Payment date</td><td>'+fmtDate(r.date)+'</td></tr>'+
+    '<tr><td>Payment method</td><td>'+esc(r.method||'—')+'</td></tr>'+
+    (r.maintenance?'<tr><td>Maintenance included</td><td>'+money(r.maintenance)+'</td></tr>':'')+
+    '</table>'+
+    '<div class="amt"><span>Amount received</span><b>'+money(r.amount)+'</b></div>'+
+    '<div class="ft"><div>Thank you for your payment.<br>This receipt is computer generated.</div>'+
+    '<div class="sig">Authorised signature</div></div>'+
+    '<p class="noprint" style="text-align:center;margin-top:22px"><button onclick="window.print()" style="font:inherit;font-weight:700;background:#16305B;color:#fff;border:none;padding:9px 18px;border-radius:8px;cursor:pointer">🖨️ Print / Save as PDF</button></p>'+
+    '</body></html>';
+  var ov=document.createElement('div'); ov.className='overlay flyer-ov';
+  ov.innerHTML='<div class="flyer-wrap"><div class="flyer-bar"><b>Receipt '+no+'</b>'+
+    '<div><button class="btn sm primary" data-r-print>'+icon('doc')+'Print / Save PDF</button>'+
+    '<button class="btn sm ghost" data-r-close>Close</button></div></div><iframe class="flyer-frame"></iframe></div>';
+  document.body.appendChild(ov); modalStack.push(ov);
+  var ifr=ov.querySelector('iframe'); ifr.srcdoc=doc;
+  ov.querySelector('[data-r-close]').onclick=closeModal;
+  ov.querySelector('[data-r-print]').onclick=function(){ try{ ifr.contentWindow.focus(); ifr.contentWindow.print(); }catch(e){ toast('Use the Print button inside the receipt','err'); } };
+  ov.addEventListener('mousedown', function(e){ if(e.target===ov) closeModal(); });
+}
+
+/* ============================================================
    PROFIT & LOSS  (the accountant's view)
    ============================================================ */
 /* What we actually paid the landlord for a collected payment.
@@ -937,18 +1577,31 @@ function pnlMonths(y){
     var ownerCost=rr.reduce(function(s,r){return s+recordOwnerCost(r);},0);
     var maint=rr.reduce(function(s,r){return s+(Number(r.maintenance)||0);},0);
     var tx=DB.transactions.filter(function(t){var d=parseDate(t.date);return d&&d.getFullYear()===y&&(d.getMonth()+1)===mo;});
-    var opex=tx.filter(function(t){return t.type==='expense';}).reduce(function(s,t){return s+(Number(t.amount)||0);},0);
+    var manualExp=tx.filter(function(t){return t.type==='expense';}).reduce(function(s,t){return s+(Number(t.amount)||0);},0);
     var otherInc=tx.filter(function(t){return t.type==='income';}).reduce(function(s,t){return s+(Number(t.amount)||0);},0);
+    // utilities the company actually bears (not charged back to a tenant)
+    var util=(DB.utilities||[]).filter(function(u){
+      if(u.recoverable) return false;
+      if(u.month && u.year) return u.month===mo && u.year===y;
+      var d=parseDate(u.billDate); return d && d.getFullYear()===y && (d.getMonth()+1)===mo;
+    }).reduce(function(s,u){return s+(Number(u.amount)||0);},0);
+    // supplier invoices dated in this month
+    var sup=(DB.invoices||[]).filter(function(i){
+      var d=parseDate(i.invoiceDate); return d && d.getFullYear()===y && (d.getMonth()+1)===mo;
+    }).reduce(function(s,i){return s+(Number(i.total)||0);},0);
+    var opex=manualExp+util+sup;
     var gross=collected-ownerCost-maint;
-    out.push({mo:mo,count:rr.length,collected:collected,ownerCost:ownerCost,maint:maint,gross:gross,opex:opex,otherInc:otherInc,net:gross+otherInc-opex});
+    out.push({mo:mo,count:rr.length,collected:collected,ownerCost:ownerCost,maint:maint,gross:gross,
+      opex:opex,manualExp:manualExp,util:util,sup:sup,otherInc:otherInc,net:gross+otherInc-opex});
   }
   return out;
 }
 function pnlTotals(months){
   return months.reduce(function(a,m){
     a.collected+=m.collected; a.ownerCost+=m.ownerCost; a.maint+=m.maint;
-    a.gross+=m.gross; a.opex+=m.opex; a.otherInc+=m.otherInc; a.net+=m.net; a.count+=m.count; return a;
-  }, {collected:0,ownerCost:0,maint:0,gross:0,opex:0,otherInc:0,net:0,count:0});
+    a.gross+=m.gross; a.opex+=m.opex; a.otherInc+=m.otherInc; a.net+=m.net; a.count+=m.count;
+    a.util+=(m.util||0); a.sup+=(m.sup||0); a.manualExp+=(m.manualExp||0); return a;
+  }, {collected:0,ownerCost:0,maint:0,gross:0,opex:0,otherInc:0,net:0,count:0,util:0,sup:0,manualExp:0});
 }
 function viewPnl(){
   var f=STATE.filters.pnl||(STATE.filters.pnl={year:curYear()});
@@ -995,7 +1648,10 @@ function viewPnl(){
     line('Rent paid to owners', T.ownerCost, {neg:true})+
     line('Maintenance', T.maint, {neg:true})+
     line('Gross profit', T.gross, {big:true, top:true})+
-    line('Operating expenses', T.opex, {neg:true})+
+    (T.util?line('Utilities (company-borne)', T.util, {neg:true}):'')+
+    (T.sup?line('Supplier invoices', T.sup, {neg:true}):'')+
+    (T.manualExp?line('Other operating expenses', T.manualExp, {neg:true}):'')+
+    ((!T.util&&!T.sup&&!T.manualExp)?line('Operating expenses', 0, {neg:true}):'')+
     line('NET PROFIT', T.net, {big:true, top:true})+
     '<div style="display:flex;justify-content:space-between;padding-top:10px"><span class="text-muted" style="font-size:12.5px">Net margin on rent collected</span>'+
     '<span class="chip '+(margin>=0?'green':'red')+'">'+margin.toFixed(1)+'%</span></div></div>';
@@ -1387,6 +2043,7 @@ function wireView(){
       if(key==='dtype') STATE.filters.debt.type=v;
       if(key==='doctab') STATE.filters.docs.tab=v;
       if(key==='rentroll') STATE.filters.rent.roll=v;
+      if(key==='acctab') STATE.filters.acc.tab=v;
       renderView();
     }); });
   });
@@ -1403,8 +2060,34 @@ function wireView(){
   $$('[data-pay-unit]',host).forEach(function(b){ b.onclick=function(){ recordRent(b.getAttribute('data-pay-unit')); }; });
   $$('[data-remind-rent]',host).forEach(function(b){ b.onclick=function(){ remindRent(b.getAttribute('data-remind-rent')); }; });
   $$('[data-remind-arrear]',host).forEach(function(b){ b.onclick=function(){ var a=b.getAttribute('data-remind-arrear').split('::'); remindRent(a[0], +a[1], +a[2]); }; });
+  $$('[data-set-start]',host).forEach(function(b){ b.onclick=function(e){ e.stopPropagation();
+    var p=DB.properties.filter(function(x){return x.id===b.getAttribute('data-set-start');})[0]; if(p) setContractStart(p); }; });
   $$('[data-remind-contract]',host).forEach(function(b){ b.onclick=function(){ remindContract(b.getAttribute('data-remind-contract')); }; });
   $$('[data-del-rent]',host).forEach(function(b){ b.onclick=function(){ var id=b.getAttribute('data-del-rent'); confirmDialog('Delete this payment record?', function(){ DB.rentRecords=DB.rentRecords.filter(function(r){return r.id!==id;}); save(); toast('Deleted','ok'); renderView(); var k=numKey(id,'r'); if(k) syncWrite([{action:'delete', sheet:'RentRecords', keyCol:'ID', key:k}]); }, true); }; });
+  // accounting
+  $$('[data-acc-tab]',host).forEach(function(b){ b.onclick=function(){ STATE.filters.acc.tab=b.getAttribute('data-acc-tab'); renderView(); }; });
+  var am=$('[data-acc-months]',host); if(am) am.onchange=function(){ STATE.filters.acc.months=+am.value; renderView(); };
+  // cheques
+  var ac=$('[data-add-cheque]',host); if(ac) ac.onclick=addCheque;
+  function chq(id){ return DB.cheques.filter(function(x){return x.id===id;})[0]; }
+  $$('[data-chq-edit]',host).forEach(function(b){ b.onclick=function(){ var c=chq(b.getAttribute('data-chq-edit')); if(c) editCheque(c); }; });
+  $$('[data-chq-clear]',host).forEach(function(b){ b.onclick=function(){ var c=chq(b.getAttribute('data-chq-clear')); if(c) setChequeStatus(c,'Cleared'); }; });
+  $$('[data-chq-bounce]',host).forEach(function(b){ b.onclick=function(){ var c=chq(b.getAttribute('data-chq-bounce')); if(c) setChequeStatus(c,'Bounced'); }; });
+  // utilities
+  var au=$('[data-add-util]',host); if(au) au.onclick=addUtility;
+  function utl(id){ return DB.utilities.filter(function(x){return x.id===id;})[0]; }
+  $$('[data-util-edit]',host).forEach(function(b){ b.onclick=function(){ var u=utl(b.getAttribute('data-util-edit')); if(u) editUtility(u); }; });
+  $$('[data-util-paid]',host).forEach(function(b){ b.onclick=function(){ var u=utl(b.getAttribute('data-util-paid')); if(!u) return;
+    u.status='Paid'; save(); toast('Marked paid','ok'); renderView();
+    var k=numKey(u.id,'ut'); if(k) syncWrite([{action:'upsert', sheet:'Utilities', keyCol:'ID', key:k, row:{Status:'Paid'}}]); }; });
+  // payables
+  var asup=$('[data-add-supplier]',host); if(asup) asup.onclick=addSupplier;
+  var ainv=$('[data-add-invoice]',host); if(ainv) ainv.onclick=addInvoice;
+  function invf(id){ return DB.invoices.filter(function(x){return x.id===id;})[0]; }
+  $$('[data-inv-edit]',host).forEach(function(b){ b.onclick=function(){ var i=invf(b.getAttribute('data-inv-edit')); if(i) editInvoice(i); }; });
+  $$('[data-inv-pay]',host).forEach(function(b){ b.onclick=function(){ var i=invf(b.getAttribute('data-inv-pay')); if(i) payInvoice(i); }; });
+  $$('[data-statement]',host).forEach(function(b){ b.onclick=function(){ openStatement(b.getAttribute('data-statement')); }; });
+  $$('[data-receipt]',host).forEach(function(b){ b.onclick=function(){ openReceipt(b.getAttribute('data-receipt')); }; });
   // profit & loss
   var py=$('[data-pnl="year"]',host); if(py) py.onchange=function(){ STATE.filters.pnl.year=+py.value; renderView(); };
   var pc=$('[data-pnl-csv]',host); if(pc) pc.onclick=exportPnlCSV;
@@ -1546,6 +2229,11 @@ async function syncFromSheet(opts){
     DB.recurringExpenses=data.recurringExpenses;
     DB.accounts=data.accounts;
     DB.studios=data.studios;
+    if(data.cheques)   DB.cheques=data.cheques;
+    if(data.utilities) DB.utilities=data.utilities;
+    if(data.suppliers) DB.suppliers=data.suppliers;
+    if(data.invoices)  DB.invoices=data.invoices;
+    DB.meta.tabsReady=data.tabsReady||[];
     DB.meta.lastSync=new Date().toISOString();
     save();
     syncing=false; setSyncUI(false);

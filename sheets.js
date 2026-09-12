@@ -53,14 +53,22 @@ function intg(v){ return Math.round(num(v)); }
 function phone(v){ return s(v).replace(/[^\d]/g,''); }
 function get(o){ for(var i=1;i<arguments.length;i++){ if(o[arguments[i]]!=null && o[arguments[i]]!=='') return o[arguments[i]]; } return ''; }
 
-async function fetchTab(id, name){
+/* NOTE: when a tab name does not exist, Google quietly returns the FIRST tab instead
+   of an error. So for every optional tab we also check the header row contains a
+   column only that tab has — otherwise we treat it as missing. */
+async function fetchTab(id, name, mustHave){
   var r = await fetch(gvizUrl(id, name), {cache:'no-store'});
   if(!r.ok) throw new Error('HTTP '+r.status+' for '+name);
   var txt = await r.text();
   if(/^\s*<|DOCTYPE html/i.test(txt)) throw new Error('Sheet not public or not found: '+name);
+  if(mustHave){
+    var rows=parseCSV(txt);
+    var hdr=(rows[0]||[]).map(function(h){ return String(h).trim(); });
+    if(hdr.indexOf(mustHave)<0) throw new Error('Tab "'+name+'" does not exist');
+  }
   return toObjects(txt);
 }
-async function tryTab(id, name){ try{ return await fetchTab(id, name); }catch(e){ return null; } }
+async function tryTab(id, name, mustHave){ try{ return await fetchTab(id, name, mustHave); }catch(e){ return null; } }
 
 /* Map raw tab rows to the app model */
 function mapProperties(rows){
@@ -85,7 +93,8 @@ function mapRent(rows){
   return (rows||[]).map(function(r){
     return { id:'r'+s(r.ID||r.Id), unit:s(r.StudioId), date:s(r.PaymentDate),
       amount:num(r.Amount), ownership:s(r.Ownership)||'Personnel',
-      month:intg(r.Month), year:intg(r.Year), maintenance:num(r.Maintenance), profit:num(r.Profit) };
+      month:intg(r.Month), year:intg(r.Year), maintenance:num(r.Maintenance), profit:num(r.Profit),
+      method:s(get(r,'Method','PaymentMethod','Mode')) };
   }).filter(function(x){ return x.unit; });
 }
 function mapDebts(rows){
@@ -120,6 +129,40 @@ function mapRecurring(rows){
       frequency:s(r.Frequency)||'Monthly', accountType:s(r.AccountType)||'Personnel' };
   }).filter(function(x){ return x.name || x.amount; });
 }
+function mapCheques(rows){
+  return (rows||[]).map(function(r){
+    return { id:'cq'+s(r.ID||r.Id), tenant:s(r.TenantName), unit:s(r.Unit), chequeNo:s(r.ChequeNo),
+      bank:s(r.Bank), chequeDate:s(r.ChequeDate), amount:num(r.Amount), purpose:s(r.Purpose)||'Rent',
+      status:s(r.Status)||'Pending', depositedDate:s(r.DepositedDate), notes:s(r.Notes) };
+  }).filter(function(x){ return x.tenant || x.chequeNo || x.amount; });
+}
+function mapUtilities(rows){
+  return (rows||[]).map(function(r){
+    var amt=num(r.Amount);
+    return { id:'ut'+s(r.ID||r.Id), unit:s(r.Unit), type:s(r.Type)||'Electricity', provider:s(r.Provider),
+      billDate:s(r.BillDate), month:intg(r.Month), year:intg(r.Year), amount:amt,
+      paidBy:s(r.PaidBy)||'Company', status:s(r.Status)||'Unpaid',
+      recoverable:/^(y|yes|true|1)$/i.test(s(r.Recoverable)), recovered:num(r.RecoveredAmount), notes:s(r.Notes) };
+  }).filter(function(x){ return x.unit || x.amount; });
+}
+function mapSuppliers(rows){
+  return (rows||[]).map(function(r){
+    return { id:'sp'+s(r.ID||r.Id), name:s(r.Name), category:s(r.Category), contact:s(r.Contact),
+      trn:s(r.TRN), notes:s(r.Notes) };
+  }).filter(function(x){ return x.name; });
+}
+function mapInvoices(rows){
+  return (rows||[]).map(function(r){
+    var amt=num(r.Amount), vat=num(r.VAT);
+    var total=(r.Total!=null && r.Total!=='')?num(r.Total):(amt+vat);
+    var paid=num(r.PaidAmount);
+    var bal=(r.Balance!=null && r.Balance!=='')?num(r.Balance):Math.max(total-paid,0);
+    return { id:'inv'+s(r.ID||r.Id), supplier:s(r.SupplierName), invoiceNo:s(r.InvoiceNo),
+      invoiceDate:s(r.InvoiceDate), dueDate:s(r.DueDate), unit:s(r.Unit), category:s(r.Category),
+      amount:amt, vat:vat, total:total, paid:paid, balance:bal,
+      status:s(r.Status)||(bal<=0?'Paid':paid>0?'Partial':'Unpaid'), notes:s(r.Notes) };
+  }).filter(function(x){ return x.supplier || x.total; });
+}
 function mapAccounts(company, personnel){
   var c=(company||[]).map(function(a){ return {id:'c'+s(a.ID||a.Id),name:s(get(a,'AccountName','Name')),budget:num(a.Budget),balance:num(a.CurrentBalance)}; }).filter(function(a){return a.name;});
   var p=(personnel||[]).map(function(a){ return {id:'pa'+s(a.ID||a.Id),name:s(get(a,'Name','AccountName')),budget:num(a.Budget),balance:num(a.CurrentBalance)}; }).filter(function(a){return a.name;});
@@ -130,13 +173,27 @@ function mapAccounts(company, personnel){
 
 /* Public: fetch everything and return an app-model object (no users, no config) */
 async function fetchAll(id){
-  var names=['Table','RentRecords','DebtTracker','pending actions','Transactions',
-             'RecurringExpenses','CompanyAccounts','PersonnelAccounts','Studios'];
+  // [tab name, a column only that tab has]
+  var tabs=[['RentRecords','StudioId'],['DebtTracker','Person'],['pending actions','Description'],
+            ['Transactions','TransactionType'],['RecurringExpenses','Frequency'],
+            ['CompanyAccounts','AccountName'],['PersonnelAccounts','Budget'],['Studios','StudioId'],
+            ['Cheques','ChequeNo'],['Utilities','BillDate'],['Suppliers','Name'],['Invoices','InvoiceNo']];
   // Verify the doc is reachable first (throws clearly if private)
   var table = await fetchTab(id, 'Table');
-  var res = await Promise.all(names.slice(1).map(function(n){ return tryTab(id,n); }));
-  var rent=res[0], debts=res[1], tasks=res[2], tx=res[3], recur=res[4], comp=res[5], pers=res[6], studios=res[7];
+  var res = await Promise.all(tabs.map(function(t){ return tryTab(id, t[0], t[1]); }));
+  var rent=res[0], debts=res[1], tasks=res[2], tx=res[3], recur=res[4], comp=res[5], pers=res[6], studios=res[7],
+      cheques=res[8], utils=res[9], sups=res[10], invs=res[11];
+  var ready=[];
+  if(cheques) ready.push('Cheques');
+  if(utils)   ready.push('Utilities');
+  if(sups)    ready.push('Suppliers');
+  if(invs)    ready.push('Invoices');
   return {
+    tabsReady: ready,
+    cheques: mapCheques(cheques),
+    utilities: mapUtilities(utils),
+    suppliers: mapSuppliers(sups),
+    invoices: mapInvoices(invs),
     properties: mapProperties(table),
     rentRecords: mapRent(rent),
     debts: mapDebts(debts),
