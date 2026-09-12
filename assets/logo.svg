@@ -1,0 +1,18 @@
+<svg width="360" height="130" viewBox="0 0 360 130" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sabir Amin Real Estate">
+  <!-- Roof -->
+  <path d="M20 46 L58 16 L96 46 L84 46 L58 28 L32 46 Z" fill="#E23B2E"/>
+  <!-- SA monogram -->
+  <text x="58" y="78" font-family="'Segoe UI', Arial, sans-serif" font-size="46" font-weight="800" fill="#16305B" text-anchor="middle" letter-spacing="-1">SA</text>
+  <!-- Gold key -->
+  <g fill="#F2A83C">
+    <circle cx="26" cy="98" r="9"/>
+    <circle cx="26" cy="98" r="3.4" fill="#16305B"/>
+    <rect x="33" y="94.5" width="56" height="7" rx="3.5"/>
+    <rect x="78" y="94.5" width="7" height="15" rx="3"/>
+    <rect x="88" y="94.5" width="7" height="12" rx="3"/>
+  </g>
+  <!-- Wordmark -->
+  <text x="118" y="58" font-family="'Segoe UI', Arial, sans-serif" font-size="30" font-weight="800" fill="#16305B" letter-spacing="0.5">SABIR AMIN</text>
+  <text x="119" y="86" font-family="'Segoe UI', Arial, sans-serif" font-size="15.5" font-weight="600" fill="#E23B2E" letter-spacing="5.5">REAL ESTATE</text>
+  <text x="120" y="106" font-family="'Segoe UI', Arial, sans-serif" font-size="11" font-weight="600" fill="#8792a6" letter-spacing="3">LLC · SPC</text>
+</svg>

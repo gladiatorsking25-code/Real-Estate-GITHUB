@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16305B">
+<title>Sabir Amin Real Estate</title>
+<meta name="description" content="Property management for SABIR AMIN REAL ESTATE LLC SPC">
+<link rel="icon" href="assets/favicon.png">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Login screen -->
+  <div id="login" class="login-wrap">
+    <form class="login-card" id="loginForm" autocomplete="off">
+      <div class="brand">
+        <img src="assets/logo.svg" alt="Sabir Amin Real Estate">
+      </div>
+      <h1 class="login-title">Property Management Portal</h1>
+      <p class="login-sub">Sign in to your dashboard</p>
+      <div class="field">
+        <label>Username</label>
+        <input id="lUser" type="text" placeholder="admin" autocapitalize="none" required>
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <input id="lPass" type="password" placeholder="••••••" required>
+      </div>
+      <div id="lErr" class="chip red hide" style="margin-bottom:12px"></div>
+      <button class="btn primary block" type="submit" style="padding:12px">Sign In</button>
+      <p class="login-sub" style="margin-top:16px;margin-bottom:0">Default: <b>admin / 123</b> &nbsp;·&nbsp; agent / 1234 &nbsp;·&nbsp; accountant / 12345</p>
+    </form>
+  </div>
+
+  <!-- App shell -->
+  <div id="app" class="app hide">
+    <div class="drawer-scrim" id="scrim"></div>
+    <aside class="sidebar" id="sidebar">
+      <div class="logo">
+        <img src="assets/icon.svg" alt="">
+        <div class="txt"><b>Sabir Amin</b><span>REAL ESTATE</span></div>
+      </div>
+      <nav id="nav"></nav>
+      <div class="spacer"></div>
+      <div class="side-user" id="sideUser"></div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <button class="hamburger" id="hamburger" aria-label="Menu">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+        </button>
+        <div>
+          <h1 class="page-title" id="pageTitle">Dashboard</h1>
+          <p class="page-sub" id="pageSub"></p>
+        </div>
+        <div class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input id="globalSearch" type="search" placeholder="Search units, tenants…">
+        </div>
+        <button class="btn sm" id="syncBtn" title="Sync from Google Sheet">
+          <svg id="syncIcon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.5 9a9 9 0 0114.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0020.5 15"/></svg>
+          <span id="syncLabel">Sync</span>
+        </button>
+        <div class="date-pill" id="datePill"></div>
+      </header>
+      <main class="content" id="view"></main>
+    </div>
+
+    <nav class="mobile-nav" id="mobileNav"></nav>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+
+  <script src="seed.js"></script>
+  <script src="sheets.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

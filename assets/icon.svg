@@ -1,0 +1,22 @@
+<svg width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="SA">
+  <rect width="120" height="120" rx="27" fill="#16305B"/>
+  <rect width="120" height="120" rx="27" fill="url(#g)" opacity="0.35"/>
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="120" y2="120" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#24518f"/>
+      <stop offset="1" stop-color="#16305B"/>
+    </linearGradient>
+  </defs>
+  <!-- Roof -->
+  <path d="M28 52 L60 26 L92 52 L81 52 L60 35 L39 52 Z" fill="#E23B2E"/>
+  <!-- SA -->
+  <text x="60" y="84" font-family="'Segoe UI', Arial, sans-serif" font-size="44" font-weight="800" fill="#ffffff" text-anchor="middle" letter-spacing="-1">SA</text>
+  <!-- Key -->
+  <g fill="#F2A83C">
+    <circle cx="35" cy="99" r="7.5"/>
+    <circle cx="35" cy="99" r="2.8" fill="#16305B"/>
+    <rect x="41" y="96" width="44" height="6" rx="3"/>
+    <rect x="74" y="96" width="6" height="12" rx="3"/>
+    <rect x="83" y="96" width="6" height="9" rx="3"/>
+  </g>
+</svg>
