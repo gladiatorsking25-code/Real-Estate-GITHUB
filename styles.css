@@ -68,7 +68,9 @@ input,select,textarea{font-family:inherit;font-size:14px}
 .side-user .nm{line-height:1.2;font-size:12.5px}
 .side-user .nm b{color:#fff;display:block}
 .side-user .nm span{color:#9fb0cd;font-size:10.5px;text-transform:capitalize}
-.side-user button{margin-left:auto;background:none;border:none;color:#9fb0cd;cursor:pointer;padding:6px;border-radius:8px}
+.side-user .nm{margin-right:auto}
+.side-user button{background:none;border:none;color:#9fb0cd;cursor:pointer;padding:6px;border-radius:8px}
+.side-user button svg{width:17px;height:17px}
 .side-user button:hover{background:#ffffff18;color:#fff}
 
 .main{min-width:0;display:flex;flex-direction:column}
@@ -283,6 +285,12 @@ select.mini,input.mini{padding:8px 11px;border:1px solid var(--line);border-radi
   .modal-b{padding:16px}
   .content{padding:15px 12px 96px}
 }
+.app-bar{display:flex;align-items:center;gap:12px;justify-content:space-between;flex-wrap:wrap;
+  padding:11px 26px;font-size:13px;font-weight:600;border-bottom:1px solid var(--line)}
+.app-bar.install{background:linear-gradient(90deg,#fdf4e4,#fff);color:#8a5b12}
+.app-bar.update{background:linear-gradient(90deg,#e9f2fc,#fff);color:var(--navy)}
+.app-bar > div{display:flex;gap:8px}
+@media(max-width:560px){.app-bar{padding:10px 15px;font-size:12px}}
 @keyframes spin{to{transform:rotate(360deg)}}
 #syncBtn{color:var(--navy)}
 #syncBtn:disabled{opacity:.75;cursor:default}

@@ -30,7 +30,7 @@
       </div>
       <div id="lErr" class="chip red hide" style="margin-bottom:12px"></div>
       <button class="btn primary block" type="submit" style="padding:12px">Sign In</button>
-      <p class="login-sub" style="margin-top:16px;margin-bottom:0">Default: <b>admin / 123</b> &nbsp;·&nbsp; agent / 1234 &nbsp;·&nbsp; accountant / 12345</p>
+      <p class="login-sub" style="margin-top:16px;margin-bottom:0">Secure access · authorised users only</p>
     </form>
   </div>
 
@@ -66,6 +66,14 @@
         </button>
         <div class="date-pill" id="datePill"></div>
       </header>
+      <div id="updateBar" class="app-bar update hide">
+        <span>✨ A new version of the app is available.</span>
+        <div><button class="btn sm" id="updateBtn">Update now</button></div>
+      </div>
+      <div id="installBar" class="app-bar install hide">
+        <span>📲 Install this app on your device for quick, full-screen access.</span>
+        <div><button class="btn sm gold" id="installBtn">Install app</button><button class="btn sm ghost" id="installDismiss">Not now</button></div>
+      </div>
       <main class="content" id="view"></main>
     </div>
 

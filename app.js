@@ -6,6 +6,7 @@
 'use strict';
 
 /* ---------- Constants ---------- */
+var APP_VERSION = '1.2.0';
 var STORE_KEY = 'SARE_DB_v1';
 var SESSION_KEY = 'SARE_SESSION';
 var CUR = 'AED';
@@ -314,8 +315,10 @@ function renderNav(){
   var u=STATE.user;
   $('#sideUser').innerHTML='<div class="av">'+esc((u.username||'?')[0].toUpperCase())+'</div>'+
     '<div class="nm"><b>'+esc(u.username)+'</b><span>'+esc(u.role)+'</span></div>'+
+    '<button id="lockBtn" title="Lock app">'+icon('key')+'</button>'+
     '<button id="logoutBtn" title="Sign out">'+icon('logout')+'</button>';
   $('#logoutBtn').onclick=logout;
+  var lb=$('#lockBtn'); if(lb) lb.onclick=lockApp;
 }
 
 function navigate(view){
@@ -630,7 +633,9 @@ function viewContracts(){
         '<td>'+fmtDate(p.contractFrom)+'</td><td>'+fmtDate(p.contractTo)+'</td>'+
         '<td><span class="chip '+st.cls+'">'+st.label+(st.days!=null?' · '+(st.days<0?Math.abs(st.days)+'d ago':st.days+'d'):'')+'</span></td>'+
         '<td class="num">'+money(p.tenantRent)+'</td>'+
-        '<td class="right"><button class="btn sm" data-renew="'+esc(p.id)+'">'+icon('edit')+'Renew</button></td></tr>';
+        '<td class="right" style="white-space:nowrap">'+
+          ((st.key==='expiring'||st.key==='expired') && phoneLinks(p.tenantContact)?'<button class="btn sm" data-remind-contract="'+esc(p.id)+'" title="WhatsApp renewal reminder">'+icon('whatsapp')+'</button> ':'')+
+          '<button class="btn sm" data-renew="'+esc(p.id)+'">'+icon('edit')+'Renew</button></td></tr>';
     }).join('')+'</tbody></table></div>';
   return html;
 }
@@ -682,7 +687,9 @@ function viewRent(){
         '<td class="num">'+money(p.tenantRent)+'</td>'+
         '<td class="num">'+(r?money(r.amount):'—')+'</td>'+
         '<td>'+(r?'<span class="chip green">Paid '+fmtDate(r.date)+'</span>':'<span class="chip red">Unpaid</span>')+'</td>'+
-        '<td class="right">'+(STATE.user.role!=='accountant'&&!r?'<button class="btn sm green" data-pay-unit="'+esc(p.unit)+'">'+icon('cash')+'Collect</button>':'')+'</td></tr>';
+        '<td class="right" style="white-space:nowrap">'+
+          (!r && phoneLinks(p.tenantContact)?'<button class="btn sm" data-remind-rent="'+esc(p.unit)+'" title="WhatsApp reminder">'+icon('whatsapp')+'</button> ':'')+
+          (STATE.user.role!=='accountant'&&!r?'<button class="btn sm green" data-pay-unit="'+esc(p.unit)+'">'+icon('cash')+'Collect</button>':'')+'</td></tr>';
     }).join('')+'</tbody></table></div></div>';
 
   // full history
@@ -697,15 +704,16 @@ function viewRent(){
 }
 function recordRent(unit){
   var f=STATE.filters.rent||{month:curMonth(),year:curYear()};
-  var p=getProp(unit);
   var units=DB.properties.map(function(x){return x.unit;});
-  formModal('Record Rent Payment', [
-    {name:'unit',label:'Unit',type:'select',value:unit||units[0],options:units,required:true,full:true},
-    {name:'amount',label:'Amount Received (AED)',type:'number',value:p?p.tenantRent:'',required:true},
+  var startUnit=unit||units[0];
+  var p0=getProp(startUnit);
+  var ov=formModal('Record Rent Payment', [
+    {name:'unit',label:'Unit',type:'select',value:startUnit,options:units,required:true,full:true},
+    {name:'amount',label:'Amount Received (AED)',type:'number',value:p0?p0.tenantRent:'',required:true},
+    {name:'maintenance',label:'Maintenance (AED)',type:'number',value:p0?(p0.maintenance||0):0},
     {name:'date',label:'Payment Date',type:'date',value:todayISO(),required:true},
     {name:'month',label:'Month',type:'select',value:f.month,options:MONTHS.slice(1).map(function(mn,i){return {value:i+1,label:mn};})},
-    {name:'year',label:'Year',type:'number',value:f.year},
-    {name:'maintenance',label:'Maintenance (AED)',type:'number',value:0}
+    {name:'year',label:'Year',type:'number',value:f.year}
   ], function(data){
     var prop=getProp(data.unit);
     var rec={ id:uid('r'), unit:data.unit, amount:+data.amount||0, date:data.date, month:+data.month, year:+data.year,
@@ -715,7 +723,22 @@ function recordRent(unit){
     syncWrite([{action:'append', sheet:'RentRecords', idCol:'ID', row:{ StudioId:rec.unit, PaymentDate:toSheetDate(rec.date),
       Amount:rec.amount, Ownership:rec.ownership, Month:rec.month, Year:rec.year, Maintenance:rec.maintenance, Profit:rec.profit }}], {appended:{obj:rec, prefix:'r'}});
   }, {submitText:'Save Payment'});
+  // Auto-load the expected rent from the Table when the unit changes
+  var sel=ov.querySelector('[name="unit"]'), amt=ov.querySelector('[name="amount"]'), mnt=ov.querySelector('[name="maintenance"]');
+  var lbl=amt.closest('.field').querySelector('label');
+  function fill(){ var pr=getProp(sel.value); if(pr){ amt.value=pr.tenantRent||''; if(mnt) mnt.value=pr.maintenance||0; if(lbl) lbl.innerHTML='Amount Received (AED) * <span style="color:var(--muted);font-weight:600">· expected '+money(pr.tenantRent||0)+'</span>'; } }
+  sel.addEventListener('change', fill); fill();
 }
+
+/* ---------- WhatsApp reminders ---------- */
+function waOpen(contact, msg){ var pl=phoneLinks(contact); if(!pl){ toast('No contact number saved for this tenant','err'); return; } window.open(pl.wa+'?text='+encodeURIComponent(msg),'_blank'); }
+function remindRent(unit){ var p=getProp(unit); if(!p) return; var f=STATE.filters.rent||{month:curMonth(),year:curYear()};
+  var msg='Dear '+(p.tenantName||'Tenant')+', gentle reminder: your rent of '+money(p.tenantRent||0)+' for '+MONTHS[f.month]+' '+f.year+' (unit '+p.unit+') is due. Kindly arrange the payment. Thank you — '+(DB.meta.company||'Sabir Amin Real Estate')+'.';
+  waOpen(p.tenantContact, msg); }
+function remindContract(pid){ var p=DB.properties.filter(function(x){return x.id===pid;})[0]; if(!p) return; var dl=daysUntil(p.contractTo);
+  var when; if(dl==null){ when='ending soon'; } else if(dl<0){ when='expired '+Math.abs(dl)+' days ago'; } else { when='due for renewal in '+dl+' days ('+fmtDate(p.contractTo)+')'; }
+  var msg='Dear '+(p.tenantName||'Tenant')+', your tenancy for unit '+p.unit+' is '+when+'. Please let us know if you would like to renew. Thank you — '+(DB.meta.company||'Sabir Amin Real Estate')+'.';
+  waOpen(p.tenantContact, msg); }
 
 /* ---------- FINANCE ---------- */
 function viewFinance(){
@@ -952,12 +975,32 @@ function viewSettings(){
     '</div><input type="file" id="restoreFile" accept="application/json,.json" class="hide"></div>';
   html+='</div>';
 
+  // App & Security
+  var lockMin=autoLockMinutes();
+  html+='<div class="card pad mt"><div class="card-h">'+icon('key','')+'<h3>App & Security</h3><span class="chip grey" style="margin-left:6px">v'+APP_VERSION+'</span></div>'+
+    '<div class="grid cols-2" style="gap:20px">'+
+      '<div>'+
+        '<div class="k" style="font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase;margin-bottom:8px">Install</div>'+
+        '<button class="btn primary block" data-install>'+icon('download')+'Install app on this device</button>'+
+        '<button class="btn block mt-s" data-check-update>'+icon('refresh')+'Check for updates</button>'+
+        '<p class="text-muted" style="font-size:11px">Installs like a normal app (home-screen icon, full screen, works offline). Updates apply automatically when you reopen it.</p>'+
+      '</div>'+
+      '<div>'+
+        '<div class="k" style="font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase;margin-bottom:8px">Security</div>'+
+        '<button class="btn block" data-change-pw>'+icon('key')+'Change my password</button>'+
+        '<div class="field mt-s" style="margin-bottom:6px"><label>Auto-lock after inactivity</label><select id="autoLockSel">'+
+          [['0','Never'],['5','5 minutes'],['15','15 minutes'],['30','30 minutes'],['60','1 hour']].map(function(o){return '<option value="'+o[0]+'"'+(String(lockMin)===o[0]?' selected':'')+'>'+o[1]+'</option>';}).join('')+
+        '</select></div>'+
+        '<button class="btn block" data-lock>'+icon('logout')+'Lock now</button>'+
+      '</div>'+
+    '</div></div>';
+
   // users
   html+='<div class="card pad mt"><div class="card-h"><h3>Users & Access</h3><div class="right"><button class="btn sm" data-add-user>'+icon('plus')+'Add User</button></div></div>'+
     '<div class="table-wrap" style="border:none"><table><thead><tr><th>Username</th><th>Role</th><th>Password</th><th></th></tr></thead><tbody>'+
-    DB.users.map(function(u){ return '<tr><td><b>'+esc(u.username)+'</b></td><td><span class="chip navy">'+esc(u.role)+'</span></td><td>'+esc('•'.repeat(String(u.password).length))+'</td>'+
+    DB.users.map(function(u){ return '<tr><td><b>'+esc(u.username)+'</b></td><td><span class="chip navy">'+esc(u.role)+'</span></td><td class="text-muted">•••••• '+(u.pass?'<span class="chip green" style="margin-left:4px">secured</span>':'<span class="chip gold" style="margin-left:4px">default</span>')+'</td>'+
       '<td class="right"><button class="btn sm ghost" data-user-edit="'+esc(u.username)+'">'+icon('edit')+'</button>'+(u.username!==STATE.user.username?'<button class="btn sm ghost" data-user-del="'+esc(u.username)+'" style="color:var(--red)">'+icon('trash')+'</button>':'')+'</td></tr>'; }).join('')+
-    '</tbody></table></div><p class="text-muted" style="font-size:11.5px;margin-bottom:0">Note: this login is a convenience gate for a private tool, not bank-grade security. Anyone with the file/link and password can access it.</p></div>';
+    '</tbody></table></div><p class="text-muted" style="font-size:11.5px;margin-bottom:0">Passwords are stored hashed on your device. This login gates the app on-screen; because the data also lives in your Google Sheet, keep the Sheet’s sharing link private too.</p></div>';
 
   // danger
   html+='<div class="card pad mt" style="border-color:#f6d6d3"><div class="card-h"><h3 style="color:var(--red)">Danger Zone</h3></div>'+
@@ -1007,6 +1050,8 @@ function wireView(){
   $$('[data-rent]',host).forEach(function(s){ s.onchange=function(){ STATE.filters.rent[s.getAttribute('data-rent')]=+s.value; renderView(); }; });
   var ar=$('[data-add-rent]',host); if(ar) ar.onclick=function(){ recordRent(); };
   $$('[data-pay-unit]',host).forEach(function(b){ b.onclick=function(){ recordRent(b.getAttribute('data-pay-unit')); }; });
+  $$('[data-remind-rent]',host).forEach(function(b){ b.onclick=function(){ remindRent(b.getAttribute('data-remind-rent')); }; });
+  $$('[data-remind-contract]',host).forEach(function(b){ b.onclick=function(){ remindContract(b.getAttribute('data-remind-contract')); }; });
   $$('[data-del-rent]',host).forEach(function(b){ b.onclick=function(){ var id=b.getAttribute('data-del-rent'); confirmDialog('Delete this payment record?', function(){ DB.rentRecords=DB.rentRecords.filter(function(r){return r.id!==id;}); save(); toast('Deleted','ok'); renderView(); var k=numKey(id,'r'); if(k) syncWrite([{action:'delete', sheet:'RentRecords', keyCol:'ID', key:k}]); }, true); }; });
   // finance
   var fy=$('[data-fin="year"]',host); if(fy) fy.onchange=function(){ STATE.filters.fin.year=+fy.value; renderView(); };
@@ -1041,6 +1086,11 @@ function wireView(){
     window.SARE_SHEETS.ping(url, sec).then(function(r){ toast(r&&r.ok?'Connected to Google Sheet ✓':'Failed'+(r&&r.error?': '+r.error:' — check URL/secret'), r&&r.ok?'ok':'err'); })
       .catch(function(){ toast('Could not reach the script URL','err'); });
   };
+  var inb=$('[data-install]',host); if(inb) inb.onclick=doInstall;
+  var cub=$('[data-check-update]',host); if(cub) cub.onclick=checkForUpdate;
+  var cpw=$('[data-change-pw]',host); if(cpw) cpw.onclick=changeMyPassword;
+  var lkb=$('[data-lock]',host); if(lkb) lkb.onclick=lockApp;
+  var als=$('#autoLockSel',host); if(als) als.onchange=function(){ DB.meta.autoLockMin=+als.value; save(); resetLockTimer(); toast('Auto-lock updated','ok'); };
   var bk=$('[data-backup]',host); if(bk) bk.onclick=doBackup;
   var rs=$('[data-restore]',host); if(rs) rs.onclick=function(){ $('#restoreFile').click(); };
   var rf=$('#restoreFile',host); if(rf) rf.onchange=doRestore;
@@ -1074,14 +1124,19 @@ function addTask(){ formModal('Add Task', [
 ], function(data){ var t={id:uid('t'),description:data.description,dueDate:data.dueDate,done:false,createdAt:new Date().toISOString()}; DB.tasks.push(t); save(); closeModal(); toast('Task added','ok'); renderView();
   syncWrite([{action:'append', sheet:'pending actions', idCol:'Id', row:{ Description:t.description, DueDate:toSheetDate(t.dueDate), IsCompleted:0, CreatedAt:t.createdAt }}], {appended:{obj:t, prefix:'t'}}); }); }
 function addUser(){ formModal('Add User', [
-  {name:'username',label:'Username',required:true},{name:'password',label:'Password',required:true},
+  {name:'username',label:'Username',required:true},{name:'password',label:'Password',type:'password',required:true},
   {name:'role',label:'Role',type:'select',value:'agent',options:[{value:'admin',label:'Admin (full access)'},{value:'agent',label:'Agent (properties)'},{value:'accountant',label:'Accountant (finance)'}]}
-], function(data){ if(DB.users.filter(function(u){return u.username===data.username;})[0]){ toast('Username exists','err'); return; } DB.users.push({username:data.username,password:data.password,role:data.role}); save(); closeModal(); toast('User added','ok'); renderView(); }); }
+], function(data){ if(DB.users.filter(function(u){return u.username===data.username;})[0]){ toast('Username exists','err'); return; }
+  sha256(data.password).then(function(h){ DB.users.push({username:data.username,pass:h,role:data.role}); save(); closeModal(); toast('User added','ok'); renderView(); }); }); }
 function editUser(un){ var u=DB.users.filter(function(x){return x.username===un;})[0]; if(!u)return;
   formModal('Edit User · '+un, [
-    {name:'password',label:'Password',value:u.password,required:true,full:true},
+    {name:'password',label:'New Password (leave blank to keep current)',type:'password',value:'',full:true},
     {name:'role',label:'Role',type:'select',value:u.role,options:[{value:'admin',label:'Admin'},{value:'agent',label:'Agent'},{value:'accountant',label:'Accountant'}]}
-  ], function(data){ u.password=data.password; u.role=data.role; save(); closeModal(); toast('Saved','ok'); renderView(); }); }
+  ], function(data){ u.role=data.role; var done=function(){ save(); closeModal(); toast('Saved','ok'); renderView(); };
+    if(data.password){ sha256(data.password).then(function(h){ u.pass=h; delete u.password; done(); }); } else done(); }); }
+function changeMyPassword(){ var u=DB.users.filter(function(x){return x.username===STATE.user.username;})[0]; if(!u){ toast('User not found','err'); return; }
+  formModal('Change My Password', [{name:'password',label:'New Password',type:'password',required:true,full:true}],
+    function(data){ sha256(data.password).then(function(h){ u.pass=h; delete u.password; save(); closeModal(); toast('Password changed ✓','ok'); }); }, {submitText:'Update'}); }
 
 /* ---------- Backup / Restore / Export ---------- */
 function download(filename, text, mime){
@@ -1193,50 +1248,103 @@ function numKey(id, prefix){ var n=String(id).replace(new RegExp('^'+prefix),'')
 /* ============================================================
    AUTH + SHELL
    ============================================================ */
-function login(username, password){
-  var u=DB.users.filter(function(x){ return x.username.toLowerCase()===username.toLowerCase() && String(x.password)===String(password); })[0];
+async function sha256(str){
+  try{ var b=await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(str)));
+    return Array.prototype.map.call(new Uint8Array(b), function(x){return x.toString(16).padStart(2,'0');}).join(''); }
+  catch(e){ return 'plain:'+String(str); }
+}
+async function login(username, password){
+  var h=await sha256(password);
+  var u=DB.users.filter(function(x){
+    if(String(x.username).toLowerCase()!==String(username).toLowerCase()) return false;
+    if(x.pass) return x.pass===h;
+    if(x.password!=null) return String(x.password)===String(password);
+    return false;
+  })[0];
   if(!u) return false;
+  var wasDefault=false;
+  if(!u.pass){ // upgrade legacy plaintext to a hash, drop the plaintext
+    if(u.password!=null){ wasDefault=(['123','1234','12345'].indexOf(String(u.password))>=0); }
+    u.pass=h; delete u.password; save();
+  }
   STATE.user={username:u.username, role:u.role};
   try{ sessionStorage.setItem(SESSION_KEY, JSON.stringify(STATE.user)); }catch(e){}
-  showApp(); return true;
+  showApp();
+  if(wasDefault) setTimeout(function(){ toast('You are using a default password — change it in Settings for security','err'); }, 1400);
+  return true;
 }
-function logout(){ try{ sessionStorage.removeItem(SESSION_KEY); }catch(e){} STATE.user=null; $('#app').classList.add('hide'); $('#login').classList.remove('hide'); $('#lPass').value=''; }
+function logout(){ try{ sessionStorage.removeItem(SESSION_KEY); }catch(e){} STATE.user=null; stopAutoLock(); $('#app').classList.add('hide'); $('#login').classList.remove('hide'); var lp=$('#lPass'); if(lp) lp.value=''; var er=$('#lErr'); if(er) er.classList.add('hide'); }
+function lockApp(){ try{ sessionStorage.removeItem(SESSION_KEY); }catch(e){} STATE.user=null; stopAutoLock(); $('#app').classList.add('hide'); $('#login').classList.remove('hide'); var lp=$('#lPass'); if(lp) lp.value=''; toast('App locked'); }
+
+/* auto-lock on inactivity */
+var lockTimer=null;
+function autoLockMinutes(){ var m=DB.meta&&DB.meta.autoLockMin; return (m===undefined?15:+m); }
+function resetLockTimer(){ if(!STATE.user){ return; } if(lockTimer) clearTimeout(lockTimer); var mins=autoLockMinutes(); if(!mins) return; lockTimer=setTimeout(lockApp, mins*60000); }
+function stopAutoLock(){ if(lockTimer){ clearTimeout(lockTimer); lockTimer=null; } }
+
 function showApp(){
   $('#login').classList.add('hide'); $('#app').classList.remove('hide');
   var now=new Date();
   $('#datePill').innerHTML=icon('clock')+now.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
   var sb=$('#syncBtn'); if(sb){ sb.onclick=function(){ syncFromSheet({}); }; setSyncUI(false); }
+  refreshInstallUI(); resetLockTimer();
   navigate(STATE.view||'dashboard');
   if(DB.meta && DB.meta.autoSync && DB.meta.sheetId) syncFromSheet({silent:true});
 }
 function openDrawer(){ $('#sidebar').classList.add('open'); $('#scrim').classList.add('show'); }
 function closeDrawer(){ $('#sidebar').classList.remove('open'); $('#scrim').classList.remove('show'); }
 
+/* ---------- PWA install & update ---------- */
+var deferredInstall=null, swReg=null, installDismissed=false;
+function canInstall(){ return !!(deferredInstall && !installDismissed); }
+function refreshInstallUI(){ var bar=$('#installBar'); if(bar) bar.classList.toggle('hide', !canInstall()); }
+function doInstall(){
+  if(deferredInstall){ deferredInstall.prompt(); deferredInstall.userChoice.then(function(c){ if(c&&c.outcome==='accepted') toast('Installing…','ok'); deferredInstall=null; refreshInstallUI(); }); }
+  else { toast('On iPhone/iPad: tap the Share button, then “Add to Home Screen”.'); }
+}
+function showUpdateBar(){ var b=$('#updateBar'); if(b) b.classList.remove('hide'); }
+function setupPWA(){
+  window.addEventListener('beforeinstallprompt', function(e){ e.preventDefault(); deferredInstall=e; refreshInstallUI(); });
+  window.addEventListener('appinstalled', function(){ deferredInstall=null; installDismissed=true; refreshInstallUI(); toast('App installed ✓','ok'); });
+  var ib=$('#installBtn'); if(ib) ib.onclick=doInstall;
+  var idm=$('#installDismiss'); if(idm) idm.onclick=function(){ installDismissed=true; refreshInstallUI(); };
+  var ub=$('#updateBtn'); if(ub) ub.onclick=function(){ if(swReg&&swReg.waiting) swReg.waiting.postMessage({type:'SKIP_WAITING'}); else location.reload(); };
+  if('serviceWorker' in navigator && location.protocol.indexOf('http')===0){
+    navigator.serviceWorker.register('sw.js').then(function(reg){
+      swReg=reg;
+      if(reg.waiting && navigator.serviceWorker.controller) showUpdateBar();
+      reg.addEventListener('updatefound', function(){ var nw=reg.installing; if(!nw) return; nw.addEventListener('statechange', function(){ if(nw.state==='installed' && navigator.serviceWorker.controller) showUpdateBar(); }); });
+      setInterval(function(){ reg.update().catch(function(){}); }, 3600000);
+      document.addEventListener('visibilitychange', function(){ if(!document.hidden && swReg) swReg.update().catch(function(){}); });
+    }).catch(function(){});
+    var reloaded=false;
+    navigator.serviceWorker.addEventListener('controllerchange', function(){ if(reloaded) return; reloaded=true; location.reload(); });
+  }
+}
+function checkForUpdate(){ if(swReg){ toast('Checking for updates…'); swReg.update().then(function(){ setTimeout(function(){ if(!(swReg&&swReg.waiting)) toast('You are on the latest version','ok'); },1500); }).catch(function(){ toast('Update check failed','err'); }); } else toast('Updates available once installed online'); }
+
 function init(){
   load();
-  // session restore
   try{ var s=sessionStorage.getItem(SESSION_KEY); if(s){ var u=JSON.parse(s); if(DB.users.filter(function(x){return x.username===u.username;})[0]) STATE.user=u; } }catch(e){}
 
   $('#loginForm').addEventListener('submit', function(e){ e.preventDefault();
-    var ok=login($('#lUser').value.trim(), $('#lPass').value.trim());
-    if(!ok){ var er=$('#lErr'); er.textContent='Invalid username or password'; er.classList.remove('hide'); }
+    var btn=this.querySelector('button[type=submit]'); if(btn) btn.disabled=true;
+    login($('#lUser').value.trim(), $('#lPass').value.trim()).then(function(ok){
+      if(btn) btn.disabled=false;
+      if(!ok){ var er=$('#lErr'); er.textContent='Invalid username or password'; er.classList.remove('hide'); }
+    });
   });
-  // sidebar nav (delegated)
   $('#nav').addEventListener('click', function(e){ var it=e.target.closest('[data-nav]'); if(it) navigate(it.getAttribute('data-nav')); });
   $('#mobileNav').addEventListener('click', function(e){ var it=e.target.closest('[data-nav]'); if(it) navigate(it.getAttribute('data-nav')); });
   $('#hamburger').addEventListener('click', openDrawer);
   $('#scrim').addEventListener('click', closeDrawer);
-  // global search
   var gs=$('#globalSearch'); var st;
   gs.addEventListener('input', function(){ clearTimeout(st); st=setTimeout(function(){ STATE.search=gs.value.trim();
     if(['properties','tenants','documents'].indexOf(STATE.view)<0) navigate('properties'); else renderView(); }, 200); });
 
+  ['click','keydown','touchstart'].forEach(function(ev){ document.addEventListener(ev, resetLockTimer, {passive:true}); });
+  setupPWA();
   if(STATE.user) showApp();
-
-  // service worker (only over http/https, not file://)
-  if('serviceWorker' in navigator && location.protocol.indexOf('http')===0){
-    navigator.serviceWorker.register('sw.js').catch(function(){});
-  }
 }
 document.addEventListener('DOMContentLoaded', init);
 })();

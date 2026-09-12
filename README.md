@@ -98,6 +98,35 @@ Then open <http://localhost:8000>.
 is the normal way to load data, so you usually won't need this. **Keep this file
 private and do not upload it to GitHub.**
 
+## Install as an app + auto-updates
+
+- Open the site in Chrome/Edge (PC/Android) → an **“Install this app”** bar appears,
+  or use **Settings → App & Security → Install app**. On iPhone/iPad: Share → **Add to
+  Home Screen**. It then runs full-screen with its own icon and works offline.
+- When you publish a new version, the app detects it and shows **“A new version is
+  available → Update now.”** You can also **Settings → Check for updates**.
+
+## Security
+
+- The default-password hint is gone from the login screen.
+- Passwords are stored **hashed** on the device (changing one via **Settings → Users**
+  or **Change my password** never stores it in clear text).
+- **Auto-lock:** the app locks after inactivity (default 15 min, configurable) and
+  there's a **Lock** button by your name. Locking keeps your data but requires the
+  password again.
+- Reminder: data also lives in your **public-readable Google Sheet**, so real
+  confidentiality means keeping the Sheet link private. For stronger security I can
+  switch reads to go through your Apps Script (so the Sheet can be made **private**) —
+  ask if you want that.
+
+## Handy extras
+
+- **WhatsApp reminders:** on the **Rent Roll**, unpaid units show a WhatsApp button
+  that opens a pre-written rent reminder to the tenant. **Contracts** that are
+  expiring/expired show a renewal-reminder button.
+- **Rent auto-fill:** recording a payment loads the unit's rent from your Table into
+  *Amount Received* automatically (and updates when you change the unit).
+
 ## Login
 
 Change these in **Settings → Users** after first sign-in.

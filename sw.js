@@ -1,5 +1,6 @@
 /* Simple offline cache for Sabir Amin Real Estate PWA */
-const CACHE = 'sare-v3';
+const CACHE = 'sare-v4';
+self.addEventListener('message', e => { if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting(); });
 const ASSETS = [
   './','./index.html','./styles.css','./app.js','./seed.js','./sheets.js','./manifest.webmanifest',
   './assets/logo.svg','./assets/icon.svg','./assets/favicon.png',
