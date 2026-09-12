@@ -302,6 +302,16 @@ select.mini,input.mini{padding:8px 11px;border:1px solid var(--line);border-radi
 @keyframes spin{to{transform:rotate(360deg)}}
 #syncBtn{color:var(--navy)}
 #syncBtn:disabled{opacity:.75;cursor:default}
+/* printing any report view */
+@media print{
+  .sidebar,.topbar,.mobile-nav,.app-bar,.toolbar,.toasts{display:none!important}
+  .app{grid-template-columns:1fr}
+  .content{padding:0;max-width:none}
+  body{background:#fff}
+  .card{box-shadow:none;break-inside:avoid;page-break-inside:avoid}
+  .table-wrap{overflow:visible}
+  table{min-width:0}
+}
 .hide{display:none!important}
 .mt{margin-top:16px}.mt-s{margin-top:10px}
 .text-muted{color:var(--muted)}

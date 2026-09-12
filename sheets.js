@@ -8,8 +8,10 @@ window.SARE_SHEETS = (function () {
 'use strict';
 
 function gvizUrl(id, sheet){
+  // "_" busts any intermediate cache so we always read the live sheet
   return 'https://docs.google.com/spreadsheets/d/' + id +
-         '/gviz/tq?tqx=out:csv&sheet=' + encodeURIComponent(sheet) + '&headers=1';
+         '/gviz/tq?tqx=out:csv&sheet=' + encodeURIComponent(sheet) +
+         '&headers=1&_=' + Date.now();
 }
 
 /* Robust CSV parser (handles quotes, escaped quotes, commas & newlines in fields) */

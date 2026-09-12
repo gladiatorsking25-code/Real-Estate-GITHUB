@@ -6,7 +6,7 @@
 'use strict';
 
 /* ---------- Constants ---------- */
-var APP_VERSION = '1.3.0';
+var APP_VERSION = '1.4.0';
 var STORE_KEY = 'SARE_DB_v1';
 var SESSION_KEY = 'SARE_SESSION';
 var CUR = 'AED';
@@ -285,6 +285,7 @@ var NAV = [
   {id:'documents', label:'Documents', icon:'folder', roles:['admin','agent','accountant']},
   {sep:'Money'},
   {id:'rent', label:'Rent Payments', icon:'cash', roles:['admin','agent','accountant']},
+  {id:'pnl', label:'Profit & Loss', icon:'trend', roles:['admin','accountant']},
   {id:'finance', label:'Finance', icon:'wallet', roles:['admin','accountant']},
   {id:'debts', label:'Debts & Dues', icon:'hand', roles:['admin','accountant']},
   {sep:'Manage'},
@@ -340,6 +341,7 @@ var TITLES = {
   contracts:['Contracts','Tenancy agreements & renewals'],
   documents:['Documents','Files, IDs & contact directory'],
   rent:['Rent Payments','Collection & rent roll'],
+  pnl:['Profit & Loss','Full accounting statement'],
   finance:['Finance','Income, expenses & profit'],
   debts:['Debts & Dues','Receivables & payables'],
   tasks:['Tasks','Reminders & pending actions'],
@@ -351,7 +353,7 @@ function renderView(){
   renderNav();
   var host=$('#view');
   var fn = ({dashboard:viewDashboard, properties:viewProperties, tenants:viewTenants, contracts:viewContracts,
-    documents:viewDocuments, rent:viewRent, finance:viewFinance, debts:viewDebts, tasks:viewTasks, settings:viewSettings})[STATE.view];
+    documents:viewDocuments, rent:viewRent, pnl:viewPnl, finance:viewFinance, debts:viewDebts, tasks:viewTasks, settings:viewSettings})[STATE.view];
   host.innerHTML = fn ? fn() : '';
   if(fn && fn.after) fn.after();
   wireView();
@@ -378,7 +380,10 @@ function viewDashboard(){
   var byOwner={}; props.forEach(function(p){ byOwner[p.ownerName]=(byOwner[p.ownerName]||0)+(Number(p.monthlyProfit)||0); });
   var ownerRows=Object.keys(byOwner).map(function(k){return {label:k,value:byOwner[k]};}).sort(function(a,b){return b.value-a.value;}).slice(0,6);
 
-  var recent=DB.rentRecords.slice().sort(function(a,b){return (parseDate(b.date)||0)-(parseDate(a.date)||0);}).slice(0,6);
+  var recent=DB.rentRecords.slice().sort(function(a,b){
+    var d=(parseDate(b.date)||0)-(parseDate(a.date)||0); if(d) return d;
+    return (parseFloat(String(b.id).replace(/\D/g,''))||0)-(parseFloat(String(a.id).replace(/\D/g,''))||0);
+  }).slice(0,6);
 
   var html='';
   if(!props.length && !DB.rentRecords.length){
@@ -428,8 +433,10 @@ function viewDashboard(){
 
   html+='<div class="card pad"><div class="card-h"><h3>Recent Payments</h3><div class="right"><button class="btn sm ghost" data-nav="rent">View all '+icon('chevron')+'</button></div></div>';
   html+= recent.length? '<div>'+recent.map(function(r){
+      var rp=getProp(r.unit);
       return '<div class="lrow"><div class="av tint-green">'+icon('cash')+'</div>'+
-        '<div class="gr"><b>'+esc(r.unit)+'</b><span>'+fmtDate(r.date)+' · '+MONTHS[r.month]+' '+r.year+'</span></div>'+
+        '<div class="gr"><b>'+esc(r.unit)+(rp&&rp.tenantName?' · '+esc(rp.tenantName):'')+'</b>'+
+        '<span>'+fmtDate(r.date)+' · for '+MONTHS[r.month]+' '+r.year+'</span></div>'+
         '<span class="amt pos">'+money(r.amount)+'</span></div>';
     }).join('')+'</div>' : emptyState('No payments yet');
   html+='</div></div>';
@@ -851,6 +858,177 @@ function flyerHTML(items, opts){
   '<div style="text-align:right"><div>Call or WhatsApp</div><div class="highlight-phone">📞 '+phone+'</div></div></div></div></body></html>';
 }
 
+/* ============================================================
+   PROFIT & LOSS  (the accountant's view)
+   ============================================================ */
+/* What we actually paid the landlord for a collected payment.
+   Derived from the sheet's own Profit column so history stays accurate:
+   ownerCost = amount - profit - maintenance   (falls back to the unit's owner rent) */
+function recordOwnerCost(r){
+  var amt=Number(r.amount)||0, mnt=Number(r.maintenance)||0, pf=Number(r.profit)||0;
+  if(r.profit!==undefined && r.profit!==null && r.profit!=='' && pf!==0) return amt-pf-mnt;
+  var p=getProp(r.unit); return p?(Number(p.ownerRent)||0):0;
+}
+function pnlMonths(y){
+  var out=[];
+  for(var mo=1;mo<=12;mo++){
+    var rr=rentFor(mo,y);
+    var collected=rr.reduce(function(s,r){return s+(Number(r.amount)||0);},0);
+    var ownerCost=rr.reduce(function(s,r){return s+recordOwnerCost(r);},0);
+    var maint=rr.reduce(function(s,r){return s+(Number(r.maintenance)||0);},0);
+    var tx=DB.transactions.filter(function(t){var d=parseDate(t.date);return d&&d.getFullYear()===y&&(d.getMonth()+1)===mo;});
+    var opex=tx.filter(function(t){return t.type==='expense';}).reduce(function(s,t){return s+(Number(t.amount)||0);},0);
+    var otherInc=tx.filter(function(t){return t.type==='income';}).reduce(function(s,t){return s+(Number(t.amount)||0);},0);
+    var gross=collected-ownerCost-maint;
+    out.push({mo:mo,count:rr.length,collected:collected,ownerCost:ownerCost,maint:maint,gross:gross,opex:opex,otherInc:otherInc,net:gross+otherInc-opex});
+  }
+  return out;
+}
+function pnlTotals(months){
+  return months.reduce(function(a,m){
+    a.collected+=m.collected; a.ownerCost+=m.ownerCost; a.maint+=m.maint;
+    a.gross+=m.gross; a.opex+=m.opex; a.otherInc+=m.otherInc; a.net+=m.net; a.count+=m.count; return a;
+  }, {collected:0,ownerCost:0,maint:0,gross:0,opex:0,otherInc:0,net:0,count:0});
+}
+function viewPnl(){
+  var f=STATE.filters.pnl||(STATE.filters.pnl={year:curYear()});
+  var y=f.year;
+  var years=uniq(DB.rentRecords.map(function(r){return r.year;}).filter(Boolean).concat([curYear()])).sort(function(a,b){return b-a;});
+  var months=pnlMonths(y), T=pnlTotals(months);
+  var margin=T.collected?(T.net/T.collected*100):0;
+
+  // current-month collection performance (accurate snapshot)
+  var m=curMonth(), cy=curYear();
+  var occ=DB.properties.filter(isOccupied);
+  var expNow=occ.reduce(function(s,p){return s+(Number(p.tenantRent)||0);},0);
+  var gotNow=rentFor(m,cy).reduce(function(s,r){return s+(Number(r.amount)||0);},0);
+  var rate=expNow?Math.round(gotNow/expNow*100):0;
+  // portfolio run-rate
+  var ownerCommit=DB.properties.reduce(function(s,p){return s+(Number(p.ownerRent)||0);},0);
+  var potential=expNow-ownerCommit;
+  var vacantCost=DB.properties.filter(function(p){return !isOccupied(p);}).reduce(function(s,p){return s+(Number(p.ownerRent)||0);},0);
+
+  var html='<div class="toolbar">'+
+    '<select class="mini" data-pnl="year">'+years.map(function(yr){return '<option'+(y===yr?' selected':'')+'>'+yr+'</option>';}).join('')+'</select>'+
+    '<div class="grow"></div>'+
+    '<button class="btn" data-pnl-csv>'+icon('download')+'Export P&L</button>'+
+    '<button class="btn" data-print>'+icon('doc')+'Print</button></div>';
+
+  // headline
+  html+='<div class="grid kpis">'+
+    kpi({icon:'cash',tint:'tint-green',val:money(T.collected),lbl:'Rent Received · '+y})+
+    kpi({icon:'home',tint:'tint-red',val:money(T.ownerCost),lbl:'Paid to Owners · '+y})+
+    kpi({icon:'trend',tint:'tint-gold',val:money(T.gross),lbl:'Gross Profit'})+
+    kpi({icon:'wallet',tint:(T.net>=0?'tint-blue':'tint-red'),val:money(T.net),lbl:'Net Profit · '+margin.toFixed(1)+'% margin'})+
+  '</div>';
+
+  // P&L statement card
+  function line(label, val, opts){ opts=opts||{};
+    return '<div style="display:flex;justify-content:space-between;padding:'+(opts.big?'11px':'8px')+' 0;'+(opts.top?'border-top:2px solid var(--line);':'border-bottom:1px solid var(--line);')+'">'+
+      '<span style="font-weight:'+(opts.big?'800':'600')+';color:'+(opts.big?'var(--navy)':'var(--ink-2)')+';font-size:'+(opts.big?'14.5px':'13.5px')+'">'+label+'</span>'+
+      '<span class="num '+(opts.neg?'neg':(opts.pos?'pos':''))+'" style="font-size:'+(opts.big?'15px':'13.5px')+'">'+(opts.neg?'− ':'')+money(Math.abs(val))+'</span></div>';
+  }
+  html+='<div class="grid cols-2 mt">';
+  html+='<div class="card pad"><div class="card-h"><h3>Profit &amp; Loss Statement</h3><span class="sub">'+y+' · '+T.count+' payments</span></div>'+
+    line('Rent received from tenants', T.collected, {pos:true})+
+    (T.otherInc?line('Other income', T.otherInc, {pos:true}):'')+
+    line('Rent paid to owners', T.ownerCost, {neg:true})+
+    line('Maintenance', T.maint, {neg:true})+
+    line('Gross profit', T.gross, {big:true, top:true})+
+    line('Operating expenses', T.opex, {neg:true})+
+    line('NET PROFIT', T.net, {big:true, top:true})+
+    '<div style="display:flex;justify-content:space-between;padding-top:10px"><span class="text-muted" style="font-size:12.5px">Net margin on rent collected</span>'+
+    '<span class="chip '+(margin>=0?'green':'red')+'">'+margin.toFixed(1)+'%</span></div></div>';
+
+  // run-rate + collection
+  html+='<div class="card pad"><div class="card-h"><h3>Monthly Run-Rate</h3><span class="sub">current portfolio</span></div>'+
+    line('Rent expected from tenants', expNow, {pos:true})+
+    line('Rent owed to owners (all '+DB.properties.length+' units)', ownerCommit, {neg:true})+
+    line('Potential monthly profit', potential, {big:true, top:true})+
+    (vacantCost?'<div class="chip red mt-s">'+icon('alert')+' Vacant units cost you '+money(vacantCost)+'/month</div>':'')+
+    '<div class="card-h mt" style="margin-bottom:8px"><h3 style="font-size:13.5px">Collection · '+MONTHS[m]+' '+cy+'</h3></div>'+
+    '<div class="bar"><i style="width:'+Math.min(rate,100)+'%;background:'+(rate>=90?'var(--green)':rate>=60?'var(--gold)':'var(--red)')+'"></i></div>'+
+    '<div style="display:flex;justify-content:space-between;margin-top:6px;font-size:12.5px"><span class="text-muted">'+money(gotNow)+' of '+money(expNow)+'</span><b>'+rate+'% collected</b></div>'+
+    (expNow-gotNow>0?'<div class="chip gold mt-s">'+money(expNow-gotNow)+' still to collect this month</div>':'')+
+  '</div></div>';
+
+  // monthly breakdown
+  html+='<div class="card pad mt"><div class="card-h"><h3>Month-by-Month · '+y+'</h3></div>'+
+    '<div class="table-wrap" style="border:none"><table><thead><tr><th>Month</th><th class="num">Payments</th><th class="num">Received</th><th class="num">To Owners</th><th class="num">Maint.</th><th class="num">Gross</th><th class="num">Expenses</th><th class="num">Net Profit</th><th class="num">Margin</th></tr></thead><tbody>'+
+    months.map(function(x){ if(!x.collected && !x.opex && !x.otherInc) return '';
+      var mg=x.collected?(x.net/x.collected*100):0;
+      return '<tr><td><b>'+MONTHS[x.mo]+'</b></td><td class="num">'+x.count+'</td>'+
+      '<td class="num pos">'+money(x.collected)+'</td><td class="num neg">'+money(x.ownerCost)+'</td>'+
+      '<td class="num">'+money(x.maint)+'</td><td class="num">'+money(x.gross)+'</td>'+
+      '<td class="num neg">'+money(x.opex)+'</td>'+
+      '<td class="num '+(x.net<0?'neg':'pos')+'"><b>'+money(x.net)+'</b></td>'+
+      '<td class="num">'+mg.toFixed(0)+'%</td></tr>';
+    }).join('')+
+    '<tr style="background:var(--navy-50)"><td><b>TOTAL</b></td><td class="num"><b>'+T.count+'</b></td>'+
+    '<td class="num pos"><b>'+money(T.collected)+'</b></td><td class="num neg"><b>'+money(T.ownerCost)+'</b></td>'+
+    '<td class="num"><b>'+money(T.maint)+'</b></td><td class="num"><b>'+money(T.gross)+'</b></td>'+
+    '<td class="num neg"><b>'+money(T.opex)+'</b></td><td class="num '+(T.net<0?'neg':'pos')+'"><b>'+money(T.net)+'</b></td>'+
+    '<td class="num"><b>'+margin.toFixed(0)+'%</b></td></tr>'+
+    '</tbody></table></div></div>';
+
+  html+='<div class="card pad mt"><div class="card-h"><h3>Net Profit by Month</h3><span class="sub">'+y+'</span></div>'+
+    barChart(months.map(function(x){return {label:MONTHS[x.mo], value:x.net, color:(x.net<0?'#e23b2e':'#12a670')};}),{height:230,showVals:true})+'</div>';
+
+  // per-studio profitability
+  var byUnit={};
+  DB.rentRecords.filter(function(r){return r.year===y;}).forEach(function(r){
+    var k=String(r.unit).trim(); if(!k) return;
+    if(!byUnit[k]) byUnit[k]={unit:k,collected:0,ownerCost:0,maint:0,profit:0,months:0};
+    var b=byUnit[k]; b.collected+=Number(r.amount)||0; b.ownerCost+=recordOwnerCost(r);
+    b.maint+=Number(r.maintenance)||0; b.profit+=recordProfit(r); b.months++;
+  });
+  var unitRows=Object.keys(byUnit).map(function(k){return byUnit[k];}).sort(function(a,b){return b.profit-a.profit;});
+  var losers=unitRows.filter(function(u){return u.profit<0;});
+  html+='<div class="card pad mt"><div class="card-h"><h3>Profit by Studio · '+y+'</h3><span class="sub">'+unitRows.length+' units with income</span></div>'+
+    (losers.length?'<div class="chip red" style="margin-bottom:10px">'+icon('alert')+' '+losers.length+' unit'+(losers.length>1?'s are':' is')+' losing money</div>':'')+
+    '<div class="table-wrap" style="border:none"><table><thead><tr><th>Unit</th><th>Tenant</th><th class="num">Months</th><th class="num">Received</th><th class="num">To Owner</th><th class="num">Profit</th><th class="num">Margin</th></tr></thead><tbody>'+
+    unitRows.map(function(u){ var p=getProp(u.unit); var mg=u.collected?(u.profit/u.collected*100):0;
+      return '<tr'+(u.profit<0?' style="background:#fdf1f0"':'')+'><td><span class="u-code">'+esc(u.unit)+'</span></td>'+
+        '<td>'+esc((p&&p.tenantName)||'—')+'</td><td class="num">'+u.months+'</td>'+
+        '<td class="num pos">'+money(u.collected)+'</td><td class="num neg">'+money(u.ownerCost)+'</td>'+
+        '<td class="num '+(u.profit<0?'neg':'pos')+'"><b>'+money(u.profit)+'</b></td>'+
+        '<td class="num">'+mg.toFixed(0)+'%</td></tr>';
+    }).join('')+'</tbody></table></div></div>';
+
+  // per-owner
+  var byOwner={};
+  unitRows.forEach(function(u){ var p=getProp(u.unit); var o=(p&&p.ownerName)||'Former / unlisted units';
+    if(!byOwner[o]) byOwner[o]={owner:o,units:0,collected:0,ownerCost:0,profit:0};
+    var b=byOwner[o]; b.units++; b.collected+=u.collected; b.ownerCost+=u.ownerCost; b.profit+=u.profit; });
+  var ownerRows=Object.keys(byOwner).map(function(k){return byOwner[k];}).sort(function(a,b){return b.ownerCost-a.ownerCost;});
+  html+='<div class="card pad mt"><div class="card-h"><h3>Landlord Payouts · '+y+'</h3><span class="sub">what you paid each owner</span></div>'+
+    '<div class="table-wrap" style="border:none"><table><thead><tr><th>Owner</th><th class="num">Units</th><th class="num">Collected</th><th class="num">Paid to Owner</th><th class="num">Your Profit</th></tr></thead><tbody>'+
+    ownerRows.map(function(o){ return '<tr><td><b>'+esc(o.owner)+'</b></td><td class="num">'+o.units+'</td>'+
+      '<td class="num pos">'+money(o.collected)+'</td><td class="num neg">'+money(o.ownerCost)+'</td>'+
+      '<td class="num '+(o.profit<0?'neg':'pos')+'"><b>'+money(o.profit)+'</b></td></tr>'; }).join('')+
+    '</tbody></table></div></div>';
+  return html;
+}
+function exportPnlCSV(){
+  var y=(STATE.filters.pnl||{}).year||curYear();
+  var months=pnlMonths(y), T=pnlTotals(months);
+  var out='SABIR AMIN REAL ESTATE — Profit & Loss '+y+'\nGenerated,'+todayISO()+'\n\n';
+  out+=csvRow(['Month','Payments','Rent Received','Paid to Owners','Maintenance','Gross Profit','Operating Expenses','Other Income','Net Profit','Margin %']);
+  months.forEach(function(x){ var mg=x.collected?(x.net/x.collected*100):0;
+    out+=csvRow([MONTHS[x.mo],x.count,x.collected,x.ownerCost,x.maint,x.gross,x.opex,x.otherInc,x.net,mg.toFixed(1)]); });
+  var tm=T.collected?(T.net/T.collected*100):0;
+  out+=csvRow(['TOTAL',T.count,T.collected,T.ownerCost,T.maint,T.gross,T.opex,T.otherInc,T.net,tm.toFixed(1)]);
+  var byUnit={};
+  DB.rentRecords.filter(function(r){return r.year===y;}).forEach(function(r){ var k=String(r.unit).trim(); if(!k)return;
+    if(!byUnit[k]) byUnit[k]={collected:0,ownerCost:0,profit:0,months:0};
+    byUnit[k].collected+=Number(r.amount)||0; byUnit[k].ownerCost+=recordOwnerCost(r); byUnit[k].profit+=recordProfit(r); byUnit[k].months++; });
+  out+='\nPROFIT BY STUDIO\n'+csvRow(['Unit','Tenant','Owner','Months','Received','Paid to Owner','Profit']);
+  Object.keys(byUnit).forEach(function(k){ var p=getProp(k); var b=byUnit[k];
+    out+=csvRow([k,(p&&p.tenantName)||'',(p&&p.ownerName)||'',b.months,b.collected,b.ownerCost,b.profit]); });
+  download('sabir-amin-P&L-'+y+'.csv', out, 'text/csv');
+  toast('P&L exported','ok');
+}
+
 /* ---------- FINANCE ---------- */
 function viewFinance(){
   var f=STATE.filters.fin||(STATE.filters.fin={year:curYear()});
@@ -1166,6 +1344,10 @@ function wireView(){
   $$('[data-remind-rent]',host).forEach(function(b){ b.onclick=function(){ remindRent(b.getAttribute('data-remind-rent')); }; });
   $$('[data-remind-contract]',host).forEach(function(b){ b.onclick=function(){ remindContract(b.getAttribute('data-remind-contract')); }; });
   $$('[data-del-rent]',host).forEach(function(b){ b.onclick=function(){ var id=b.getAttribute('data-del-rent'); confirmDialog('Delete this payment record?', function(){ DB.rentRecords=DB.rentRecords.filter(function(r){return r.id!==id;}); save(); toast('Deleted','ok'); renderView(); var k=numKey(id,'r'); if(k) syncWrite([{action:'delete', sheet:'RentRecords', keyCol:'ID', key:k}]); }, true); }; });
+  // profit & loss
+  var py=$('[data-pnl="year"]',host); if(py) py.onchange=function(){ STATE.filters.pnl.year=+py.value; renderView(); };
+  var pc=$('[data-pnl-csv]',host); if(pc) pc.onclick=exportPnlCSV;
+  var pp=$('[data-print]',host); if(pp) pp.onclick=function(){ window.print(); };
   // finance
   var fy=$('[data-fin="year"]',host); if(fy) fy.onchange=function(){ STATE.filters.fin.year=+fy.value; renderView(); };
   $$('[data-add-tx]',host).forEach(function(b){ b.onclick=function(){ addTransaction(b.getAttribute('data-add-tx')); }; });

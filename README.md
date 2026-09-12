@@ -128,6 +128,27 @@ was paid, and a status chip — `Overdue 11d`, `Due 8 Sep`, or `Paid 30 Aug`. Ov
 rows are highlighted, with a WhatsApp reminder button and a **Collect** button.
 A red summary shows *"N unpaid · AED X outstanding this month"*.
 
+## Profit & Loss (your accounts)
+
+**Profit & Loss** in the sidebar is the full accounting statement, built from
+`RentRecords` + `Table` + your Finance transactions:
+
+- **P&L statement** — rent received → rent paid to owners → maintenance →
+  **gross profit** → operating expenses → **net profit**, with net margin %.
+- **Monthly run-rate** — what the current portfolio *should* earn each month:
+  expected rent vs. what you owe all landlords = potential monthly profit. It also
+  warns what your **vacant units are costing you per month**.
+- **Collection tracker** — % of this month's rent collected and what's still owed.
+- **Month-by-month table** — every month's received / paid out / maintenance /
+  gross / expenses / net / margin, with a totals row.
+- **Profit by studio** — which units make money and which **lose** money (flagged red).
+- **Landlord payouts** — how much you paid each owner and what you kept.
+- **Export P&L** to CSV, or **Print** a clean statement (sidebar/buttons are hidden).
+
+Owner cost per payment is taken from your sheet's own `Profit` column
+(`owner cost = amount − profit − maintenance`), so historical figures stay exact even
+if a unit's rent changes later.
+
 ## Daily morning WhatsApp report
 
 Your Apps Script can message you every morning with the full rent + expiry picture.
