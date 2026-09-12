@@ -119,6 +119,43 @@ private and do not upload it to GitHub.**
   switch reads to go through your Apps Script (so the Sheet can be made **private**) —
   ask if you want that.
 
+## Who hasn't paid rent
+
+**Rent Payments** → pick any **month/year**, then use the **All / Unpaid / Paid**
+tabs on the Rent Roll. Each row shows the tenant + phone, the rent amount, the
+**date rent is due that month** (taken from each tenant's contract start day), what
+was paid, and a status chip — `Overdue 11d`, `Due 8 Sep`, or `Paid 30 Aug`. Overdue
+rows are highlighted, with a WhatsApp reminder button and a **Collect** button.
+A red summary shows *"N unpaid · AED X outstanding this month"*.
+
+## Daily morning WhatsApp report
+
+Your Apps Script can message you every morning with the full rent + expiry picture.
+One-time setup (all inside `apps-script/Code.gs`, see the comments at the top):
+
+1. Register with **CallMeBot** (free) to get an API key for your own WhatsApp number.
+2. Fill `OWNER_PHONE` and `CALLMEBOT_APIKEY` at the top of `Code.gs`.
+   (Prefer email instead? Set `SEND_EMAIL = true` and `OWNER_EMAIL`.)
+3. In the Apps Script editor, select the function **`createDailyTrigger`** and click
+   **Run** once. That schedules it for ~7 AM daily.
+4. To preview the message immediately, run **`testDigest`** and check View → Logs.
+
+The message lists every unpaid unit (tenant, amount, due day), the total
+outstanding, and every contract expiring within `EXPIRY_DAYS` (default 30).
+
+## Studio marketing flyer (ad)
+
+**Contracts → Marketing Flyer** builds a printable A4 advert of everything you can
+offer: vacant units (*Available Now*) plus units whose contracts expire within the
+window you choose (shown with their free-from date). Set the contact number, area
+line, and an **uplift** added to units that have no asking price. Then **Print /
+Save as PDF** or **Save HTML** to share on WhatsApp.
+
+> **Pricing tip:** to control the advertised price per studio exactly, add an
+> **`AskingRent`** column to your `Table` tab in the Google Sheet (or fill *Asking
+> Rent for ads* when editing a unit). When set, it overrides the uplift. Without it
+> the flyer uses the unit's rent + the uplift, so it never advertises at your cost.
+
 ## Handy extras
 
 - **WhatsApp reminders:** on the **Rent Roll**, unpaid units show a WhatsApp button

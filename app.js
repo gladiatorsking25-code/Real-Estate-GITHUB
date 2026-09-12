@@ -6,7 +6,7 @@
 'use strict';
 
 /* ---------- Constants ---------- */
-var APP_VERSION = '1.2.0';
+var APP_VERSION = '1.3.0';
 var STORE_KEY = 'SARE_DB_v1';
 var SESSION_KEY = 'SARE_SESSION';
 var CUR = 'AED';
@@ -569,6 +569,7 @@ function propFields(p){
     {name:'tenantContact',label:'Tenant Contact',value:p.tenantContact},
     {name:'ownerRent',label:'Owner Rent (AED)',type:'number',value:p.ownerRent},
     {name:'tenantRent',label:'Tenant Rent (AED)',type:'number',value:p.tenantRent},
+    {name:'askingRent',label:'Asking Rent for ads (AED)',type:'number',value:p.askingRent,placeholder:'used on the flyer'},
     {name:'maintenance',label:'Maintenance (AED)',type:'number',value:p.maintenance||0},
     {name:'security',label:'Security / Cheque',value:p.security,placeholder:'e.g. 2000 cheque'},
     {name:'contractFrom',label:'Contract From',type:'date',value:toDateInput(p.contractFrom)},
@@ -581,7 +582,7 @@ function propFields(p){
 }
 function addProperty(){
   formModal('Add Unit', propFields(), function(data){
-    data.id=uid('p'); data.ownerRent=+data.ownerRent||0; data.tenantRent=+data.tenantRent||0; data.maintenance=+data.maintenance||0;
+    data.id=uid('p'); data.ownerRent=+data.ownerRent||0; data.tenantRent=+data.tenantRent||0; data.maintenance=+data.maintenance||0; data.askingRent=+data.askingRent||0;
     data.monthlyProfit=data.tenantRent-data.ownerRent-data.maintenance;
     DB.properties.push(data); save(); closeModal(); toast('Unit added','ok'); renderView();
     syncWrite([{action:'append', sheet:'Table', idCol:'S_No', row: propRow(data,true)}], {appended:{obj:data, prefix:'p'}});
@@ -589,7 +590,7 @@ function addProperty(){
 }
 function editProperty(p){
   formModal('Edit '+p.unit, propFields(p), function(data){
-    Object.assign(p, data); p.ownerRent=+data.ownerRent||0; p.tenantRent=+data.tenantRent||0; p.maintenance=+data.maintenance||0;
+    Object.assign(p, data); p.ownerRent=+data.ownerRent||0; p.tenantRent=+data.tenantRent||0; p.maintenance=+data.maintenance||0; p.askingRent=+data.askingRent||0;
     p.monthlyProfit=p.tenantRent-p.ownerRent-p.maintenance;
     save(); closeModal(); toast('Saved','ok'); renderView();
     syncWrite([{action:'upsert', sheet:'Table', keyCol:'S_No', key:String(p.id).replace(/^p/,''), row: propRow(p)}]);
@@ -624,7 +625,8 @@ function viewContracts(){
     .sort(function(a,b){ return (a.st.days==null?9e9:a.st.days)-(b.st.days==null?9e9:b.st.days); });
 
   var html='<div class="toolbar"><div class="seg" data-seg="cstatus">'+
-    segBtns([['all','All ('+counts.all+')'],['expiring','Expiring ('+counts.expiring+')'],['expired','Expired ('+counts.expired+')'],['active','Active ('+counts.active+')']], f.status)+'</div></div>';
+    segBtns([['all','All ('+counts.all+')'],['expiring','Expiring ('+counts.expiring+')'],['expired','Expired ('+counts.expired+')'],['active','Active ('+counts.active+')']], f.status)+'</div>'+
+    '<div class="grow"></div><button class="btn gold" data-flyer>'+icon('doc')+'Marketing Flyer</button></div>';
 
   if(!filtered.length) return html+emptyState('No contracts in this category');
   html+='<div class="table-wrap"><table><thead><tr><th>Unit</th><th>Tenant</th><th>From</th><th>To</th><th>Status</th><th class="num">Tenant Rent</th><th></th></tr></thead><tbody>'+
@@ -654,8 +656,11 @@ function renewContract(p){
 }
 
 /* ---------- RENT ---------- */
+function rentDueDay(p){ var d=parseDate(p.contractFrom); return d?d.getDate():1; }
+function rentDueDate(p, month, year){ var day=rentDueDay(p); var dim=new Date(year, month, 0).getDate(); return new Date(year, month-1, Math.min(day, dim)); }
 function viewRent(){
   var f=STATE.filters.rent||(STATE.filters.rent={month:curMonth(),year:curYear()});
+  if(!f.roll) f.roll='all';
   var years=uniq(DB.rentRecords.map(function(r){return r.year;})).concat([curYear()]);
   years=uniq(years).sort(function(a,b){return b-a;});
   var recs=rentFor(f.month,f.year);
@@ -679,18 +684,33 @@ function viewRent(){
     kpi({icon:'trend',tint:(profit>=0?'tint-blue':'tint-red'),val:money(profit),lbl:'Net Profit'})+
   '</div>';
 
-  // Rent roll
-  html+='<div class="card pad mt"><div class="card-h"><h3>Rent Roll · '+MONTHS[f.month]+' '+f.year+'</h3><span class="sub">'+Object.keys(paidUnits).length+' of '+occ.length+' paid</span></div>';
-  html+='<div class="table-wrap" style="border:none"><table><thead><tr><th>Unit</th><th>Tenant</th><th class="num">Expected</th><th class="num">Paid</th><th>Status</th><th></th></tr></thead><tbody>'+
-    occ.map(function(p){ var key=String(p.unit).trim().toLowerCase(); var r=paidUnits[key];
-      return '<tr><td><span class="u-code">'+esc(p.unit)+'</span></td><td>'+esc(p.tenantName)+'</td>'+
+  // Rent roll (with paid/unpaid filter + due dates)
+  var rows=occ.map(function(p){ return {p:p, r:paidUnits[String(p.unit).trim().toLowerCase()]}; });
+  var unpaidRows=rows.filter(function(x){return !x.r;});
+  var unpaidTotal=unpaidRows.reduce(function(s,x){return s+(Number(x.p.tenantRent)||0);},0);
+  var shown=rows.filter(function(x){ return f.roll==='all'||(f.roll==='paid'&&x.r)||(f.roll==='unpaid'&&!x.r); });
+
+  html+='<div class="card pad mt"><div class="card-h"><h3>Rent Roll · '+MONTHS[f.month]+' '+f.year+'</h3>'+
+    '<span class="sub">'+Object.keys(paidUnits).length+' of '+occ.length+' paid</span>'+
+    '<div class="right"><div class="seg" data-seg="rentroll">'+segBtns([['all','All ('+rows.length+')'],['unpaid','Unpaid ('+unpaidRows.length+')'],['paid','Paid ('+(rows.length-unpaidRows.length)+')']], f.roll)+'</div></div></div>';
+  if(unpaidRows.length) html+='<div class="chip red" style="margin-bottom:12px">'+icon('alert')+' '+unpaidRows.length+' unpaid · '+money(unpaidTotal)+' outstanding this month</div>';
+  if(!shown.length) html+=emptyState(f.roll==='unpaid'?'Everyone has paid for '+MONTHS[f.month]+' 🎉':'No units to show');
+  else html+='<div class="table-wrap" style="border:none"><table><thead><tr><th>Unit</th><th>Tenant</th><th class="num">Rent</th><th>Rent due</th><th class="num">Paid</th><th>Status</th><th></th></tr></thead><tbody>'+
+    shown.map(function(x){ var p=x.p, r=x.r; var due=rentDueDate(p,f.month,f.year); var od=daysUntil(due); var overdue=!r && od<0; var tc=phoneLinks(p.tenantContact);
+      var status = r ? '<span class="chip green">Paid '+fmtDate(r.date)+'</span>'
+        : overdue ? '<span class="chip red">Overdue '+Math.abs(od)+'d</span>'
+        : '<span class="chip gold">Due '+due.getDate()+' '+MONTHS[f.month]+'</span>';
+      return '<tr'+(overdue?' style="background:#fdf1f0"':'')+'><td><span class="u-code">'+esc(p.unit)+'</span></td>'+
+        '<td><b style="color:var(--ink)">'+esc(p.tenantName)+'</b>'+(tc?'<div class="text-muted" style="font-size:11px">'+tc.display+'</div>':'')+'</td>'+
         '<td class="num">'+money(p.tenantRent)+'</td>'+
+        '<td>'+due.getDate()+' '+MONTHS[f.month]+' '+f.year+'</td>'+
         '<td class="num">'+(r?money(r.amount):'—')+'</td>'+
-        '<td>'+(r?'<span class="chip green">Paid '+fmtDate(r.date)+'</span>':'<span class="chip red">Unpaid</span>')+'</td>'+
+        '<td>'+status+'</td>'+
         '<td class="right" style="white-space:nowrap">'+
-          (!r && phoneLinks(p.tenantContact)?'<button class="btn sm" data-remind-rent="'+esc(p.unit)+'" title="WhatsApp reminder">'+icon('whatsapp')+'</button> ':'')+
+          (!r && tc?'<button class="btn sm" data-remind-rent="'+esc(p.unit)+'" title="WhatsApp reminder">'+icon('whatsapp')+'</button> ':'')+
           (STATE.user.role!=='accountant'&&!r?'<button class="btn sm green" data-pay-unit="'+esc(p.unit)+'">'+icon('cash')+'Collect</button>':'')+'</td></tr>';
-    }).join('')+'</tbody></table></div></div>';
+    }).join('')+'</tbody></table></div>';
+  html+='</div>';
 
   // full history
   var hist=DB.rentRecords.slice().sort(function(a,b){return (parseDate(b.date)||0)-(parseDate(a.date)||0);}).slice(0,40);
@@ -739,6 +759,97 @@ function remindContract(pid){ var p=DB.properties.filter(function(x){return x.id
   var when; if(dl==null){ when='ending soon'; } else if(dl<0){ when='expired '+Math.abs(dl)+' days ago'; } else { when='due for renewal in '+dl+' days ('+fmtDate(p.contractTo)+')'; }
   var msg='Dear '+(p.tenantName||'Tenant')+', your tenancy for unit '+p.unit+' is '+when+'. Please let us know if you would like to renew. Thank you — '+(DB.meta.company||'Sabir Amin Real Estate')+'.';
   waOpen(p.tenantContact, msg); }
+
+/* ---------- Marketing flyer for available / expiring studios ---------- */
+function fmtShortDate(v){ var d=parseDate(v); if(!d) return ''; var mm=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]; return String(d.getDate()).padStart(2,'0')+'-'+mm+'-'+String(d.getFullYear()).slice(2); }
+function studioAdItems(days, includeVacant){
+  var out=[];
+  DB.properties.forEach(function(p){
+    var occ=isOccupied(p), dl=daysUntil(p.contractTo);
+    if(!occ){ if(includeVacant) out.push({p:p, status:'Available Now', soon:false, dl:-1}); }
+    else if(dl!=null && dl>=0 && dl<=days){ out.push({p:p, status:fmtShortDate(p.contractTo), soon:true, dl:dl}); }
+  });
+  out.sort(function(a,b){ return a.dl-b.dl; });
+  return out;
+}
+function flyerDialog(){
+  formModal('Create Studio Flyer', [
+    {name:'days',label:'Include contracts expiring within (days)',type:'number',value:30},
+    {name:'includeVacant',label:'Include vacant units',type:'select',value:'yes',options:[{value:'yes',label:'Yes'},{value:'no',label:'No'}]},
+    {name:'uplift',label:'Add to rent for units with no Asking Rent (AED)',type:'number',value:(DB.meta.adUplift!=null?DB.meta.adUplift:1000)},
+    {name:'phone',label:'Contact number shown on flyer',value:(DB.meta.adPhone||'00971582779984'),full:true},
+    {name:'area',label:'Area / location line',value:(DB.meta.adArea||'MBZ Abu Dhabi • Mohammed Bin Zayed City, Abu Dhabi, UAE'),full:true}
+  ], function(data){ DB.meta.adPhone=data.phone; DB.meta.adArea=data.area; DB.meta.adUplift=+data.uplift||0; save(); closeModal();
+    openFlyer(+data.days||30, data.includeVacant!=='no', data.phone, data.area, +data.uplift||0); }, {submitText:'Generate flyer'});
+}
+function openFlyer(days, includeVacant, phone, area, uplift){
+  var items=studioAdItems(days, includeVacant);
+  if(!items.length){ toast('No available or soon-expiring studios to advertise','err'); return; }
+  var html=flyerHTML(items, {phone:phone, area:area, uplift:uplift||0});
+  var ov=document.createElement('div'); ov.className='overlay flyer-ov';
+  ov.innerHTML='<div class="flyer-wrap">'+
+    '<div class="flyer-bar"><b>Studio Flyer · '+items.length+' unit'+(items.length>1?'s':'')+'</b>'+
+      '<div><button class="btn sm primary" data-f-print>'+icon('doc')+'Print / Save PDF</button>'+
+      '<button class="btn sm" data-f-copy>'+icon('download')+'Save HTML</button>'+
+      '<button class="btn sm ghost" data-f-close>Close</button></div></div>'+
+    '<iframe class="flyer-frame" title="Studio flyer"></iframe></div>';
+  document.body.appendChild(ov); modalStack.push(ov);
+  var ifr=ov.querySelector('iframe'); ifr.srcdoc=html;
+  ov.querySelector('[data-f-close]').onclick=closeModal;
+  ov.querySelector('[data-f-print]').onclick=function(){ try{ ifr.contentWindow.focus(); ifr.contentWindow.print(); }catch(e){ toast('Use your browser menu → Print','err'); } };
+  ov.querySelector('[data-f-copy]').onclick=function(){ download('studio-flyer-'+todayISO()+'.html', html, 'text/html'); };
+  ov.addEventListener('mousedown', function(e){ if(e.target===ov) closeModal(); });
+}
+function flyerHTML(items, opts){
+  var now=new Date();
+  var monthYear=['January','February','March','April','May','June','July','August','September','October','November','December'][now.getMonth()]+' '+now.getFullYear();
+  var logo='<svg width="70" height="70" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg"><rect width="120" height="120" rx="27" fill="#16305B"/><path d="M28 52 L60 26 L92 52 L81 52 L60 35 L39 52 Z" fill="#E23B2E"/><text x="60" y="84" font-family="Arial" font-size="44" font-weight="800" fill="#fff" text-anchor="middle">SA</text><g fill="#F2A83C"><circle cx="35" cy="99" r="7.5"/><circle cx="35" cy="99" r="2.8" fill="#16305B"/><rect x="41" y="96" width="44" height="6" rx="3"/><rect x="74" y="96" width="6" height="12" rx="3"/><rect x="83" y="96" width="6" height="9" rx="3"/></g></svg>';
+  var rows=items.map(function(it){ var p=it.p;
+    var rent=Number(p.askingRent)>0 ? Math.round(Number(p.askingRent))
+             : Math.round(Number(p.tenantRent||p.ownerRent||0) + (Number(opts.uplift)||0));
+    var badge=it.soon?('<span class="status-badge status-soon">'+esc(it.status)+'</span>'):'<span class="status-badge status-available">Available Now</span>';
+    return '<tr><td class="col-studio"><div class="studio-name">'+esc(p.unit)+'</div><div class="studio-meta">'+esc(p.type||'Studio')+' • Furnished</div></td>'+
+      '<td class="col-rent"><span class="rent-display">'+rent.toLocaleString('en-US')+'<span class="rent-currency">AED</span></span></td>'+
+      '<td class="col-status">'+badge+'</td>'+
+      '<td class="col-terms"><strong>Agreement:</strong> 200 AED<br><strong>Security:</strong> One month ('+rent.toLocaleString('en-US')+' AED) cheque or cash</td></tr>';
+  }).join('');
+  var phone=esc(opts.phone||'00971582779984'); var area=esc(opts.area||'Abu Dhabi, UAE');
+  return '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Premium Studios — Sabir Amin Real Estate</title>'+
+  '<style>@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap");*{margin:0;padding:0;box-sizing:border-box}@page{size:A4 portrait;margin:10mm}'+
+  'body{font-family:Inter,-apple-system,Segoe UI,Roboto,sans-serif;font-size:9pt;line-height:1.3;color:#1a1a1a;background:#f3f4f6;-webkit-font-smoothing:antialiased}'+
+  '.page{max-width:190mm;margin:15px auto;background:#fff;box-shadow:0 4px 6px rgba(0,0,0,.1);padding:15px;min-height:277mm}'+
+  '.header{background:linear-gradient(135deg,#1e3a8a,#3b82f6);color:#fff;padding:10px 15px;border-radius:8px;margin-bottom:10px}'+
+  '.header-content{display:flex;align-items:center;gap:15px}.logo-container{flex-shrink:0;background:#fff;padding:5px;border-radius:8px}'+
+  '.company-name{font-size:16pt;font-weight:700;margin-bottom:2px}.tagline{font-size:9pt;opacity:.95;margin-bottom:4px}'+
+  '.contact-info{font-size:10pt;font-weight:600;background:rgba(255,255,255,.2);display:inline-block;padding:3px 10px;border-radius:15px}'+
+  '.section-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:2px solid #e5e7eb}'+
+  '.section-title{font-size:11pt;font-weight:700;color:#1e3a8a;text-transform:uppercase}.date-badge{background:#f3f4f6;padding:2px 8px;border-radius:10px;font-size:8pt;color:#6b7280;font-weight:600}'+
+  '.studio-table{width:100%;border-collapse:separate;border-spacing:0;margin-bottom:8px;font-size:8.5pt}'+
+  '.studio-table thead th{background:#f8fafc;color:#1e40af;font-weight:700;text-transform:uppercase;font-size:7.5pt;padding:6px 8px;border-bottom:2px solid #3b82f6;text-align:left}'+
+  '.studio-table tbody td{padding:4px 8px;border-bottom:1px solid #e5e7eb;vertical-align:middle}.studio-table tbody tr:nth-child(even){background:#fafbfc}'+
+  '.col-rent{text-align:right}.col-terms{font-size:7.5pt;color:#4b5563}.studio-name{font-weight:700;color:#111827;font-size:9pt}.studio-meta{font-size:7.5pt;color:#6b7280}'+
+  '.rent-display{font-weight:700;font-size:10pt;color:#059669}.rent-currency{font-size:7.5pt;color:#6b7280;margin-left:2px}'+
+  '.status-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:7pt;font-weight:700;text-transform:uppercase}'+
+  '.status-available{background:#d1fae5;color:#065f46;border:1px solid #a7f3d0}.status-soon{background:#fef3c7;color:#92400e;border:1px solid #fde68a}'+
+  '.amenities-box{background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:8px 10px;margin-top:6px}'+
+  '.amenities-title{font-weight:700;font-size:8.5pt;color:#1e40af;margin-bottom:5px;text-align:center}'+
+  '.amenities-list{display:grid;grid-template-columns:repeat(6,1fr);gap:3px 8px;font-size:7.5pt;text-align:center}'+
+  '.amenity-item{color:#374151;background:#f3f4f6;padding:2px 4px;border-radius:4px}'+
+  '.footer{margin-top:10px;padding-top:8px;border-top:2px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center;font-size:8pt;color:#6b7280}'+
+  '.footer-brand{font-weight:700;color:#1e3a8a;font-size:9pt}.highlight-phone{color:#059669;font-weight:700;font-size:10pt}'+
+  '.printbar{max-width:190mm;margin:10px auto 0;text-align:center}.printbar button{font:inherit;font-weight:700;background:#1e3a8a;color:#fff;border:none;padding:9px 18px;border-radius:8px;cursor:pointer}'+
+  '@media print{.printbar{display:none}.page{margin:0;box-shadow:none;min-height:auto}.header,.studio-table thead th,.status-badge{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style></head><body>'+
+  '<div class="printbar"><button onclick="window.print()">🖨️ Print / Save as PDF</button></div>'+
+  '<div class="page"><div class="header"><div class="header-content"><div class="logo-container">'+logo+'</div>'+
+  '<div class="header-text"><div class="company-name">PREMIUM FURNISHED STUDIOS</div><div class="tagline">'+area+'</div><div class="contact-info">📞 '+phone+'</div></div></div></div>'+
+  '<div class="section-header"><div class="section-title">📋 Available Properties</div><div class="date-badge">'+monthYear+'</div></div>'+
+  '<table class="studio-table"><thead><tr><th class="col-studio">Studio Details</th><th class="col-rent">Monthly Rent</th><th class="col-status">Status</th><th class="col-terms">Terms &amp; Conditions</th></tr></thead><tbody>'+rows+'</tbody></table>'+
+  '<div class="amenities-box"><div class="amenities-title">✨ STANDARD PREMIUM AMENITIES INCLUDED IN ALL STUDIOS</div><div class="amenities-list">'+
+  ['🛏️ Bed Set','🚗 Parking','📺 LED TV','❄️ Fridge','🧺 Washing Machine','🍳 Stove','🔥 Gas Cylinder','🗄️ Wardrobe','🍲 Microwave','🍽️ Kitchen','🚿 Private Bath','📶 Wi-Fi'].map(function(a){return '<div class="amenity-item">'+a+'</div>';}).join('')+
+  '</div></div>'+
+  '<div class="footer"><div><div class="footer-brand">'+esc(DB.meta.company||'Sabir Amin Real Estate LLC')+'</div><div>Licensed Real Estate Agency</div></div>'+
+  '<div style="text-align:right"><div>Call or WhatsApp</div><div class="highlight-phone">📞 '+phone+'</div></div></div></div></body></html>';
+}
 
 /* ---------- FINANCE ---------- */
 function viewFinance(){
@@ -1037,6 +1148,7 @@ function wireView(){
       if(key==='cstatus') STATE.filters.contract.status=v;
       if(key==='dtype') STATE.filters.debt.type=v;
       if(key==='doctab') STATE.filters.docs.tab=v;
+      if(key==='rentroll') STATE.filters.rent.roll=v;
       renderView();
     }); });
   });
@@ -1046,6 +1158,7 @@ function wireView(){
   var ap=$('[data-add-prop]',host); if(ap) ap.onclick=addProperty;
   // contract renew
   $$('[data-renew]',host).forEach(function(b){ b.onclick=function(){ var p=DB.properties.filter(function(x){return x.id===b.getAttribute('data-renew');})[0]; if(p) renewContract(p); }; });
+  var fly=$('[data-flyer]',host); if(fly) fly.onclick=flyerDialog;
   // rent
   $$('[data-rent]',host).forEach(function(s){ s.onchange=function(){ STATE.filters.rent[s.getAttribute('data-rent')]=+s.value; renderView(); }; });
   var ar=$('[data-add-rent]',host); if(ar) ar.onclick=function(){ recordRent(); };
@@ -1236,7 +1349,7 @@ function debtRow(d, forAppend){
 }
 function propRow(p, forAppend){
   var row={ Flat:p.type, OwnerName:p.ownerName, OwnerContact:p.ownerContact, TenantName:p.tenantName, TenantContact:p.tenantContact,
-    Location:p.unit, OwnerRent:p.ownerRent, TenantRent:p.tenantRent, SecurityCheque:p.security,
+    Location:p.unit, OwnerRent:p.ownerRent, TenantRent:p.tenantRent, AskingRent:(p.askingRent||''), SecurityCheque:p.security,
     TContractFrom:toSheetDate(p.contractFrom), TContractTo:toSheetDate(p.contractTo), Property:p.ownership,
     OwnerContract:toSheetDate(p.ownerContract), Maintenance:p.maintenance, Coordinates:p.coordinates, GoogleMap:p.mapLink,
     ReadyToMove:p.readyToMove?'Yes':'No', DriveFolderLink:p.driveLink, Profit:p.monthlyProfit };

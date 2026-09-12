@@ -138,6 +138,7 @@ input,select,textarea{font-family:inherit;font-size:14px}
 
 /* ---------- Chips / badges ---------- */
 .chip{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:20px;font-size:11.5px;font-weight:700}
+.chip svg{width:13px;height:13px;flex:none}
 .chip.green{background:var(--green-50);color:var(--green)}
 .chip.red{background:var(--red-50);color:var(--red)}
 .chip.gold{background:var(--gold-50);color:#c8801a}
@@ -291,6 +292,13 @@ select.mini,input.mini{padding:8px 11px;border:1px solid var(--line);border-radi
 .app-bar.update{background:linear-gradient(90deg,#e9f2fc,#fff);color:var(--navy)}
 .app-bar > div{display:flex;gap:8px}
 @media(max-width:560px){.app-bar{padding:10px 15px;font-size:12px}}
+/* flyer preview */
+.flyer-ov{padding:16px}
+.flyer-wrap{background:#fff;width:100%;max-width:920px;margin:auto;display:flex;flex-direction:column;height:92vh;border-radius:14px;overflow:hidden;box-shadow:var(--shadow-lg)}
+.flyer-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 15px;border-bottom:1px solid var(--line);background:var(--surface-2);flex-wrap:wrap}
+.flyer-bar b{color:var(--navy);font-size:14px}
+.flyer-bar > div{display:flex;gap:8px;flex-wrap:wrap}
+.flyer-frame{flex:1;width:100%;border:none;background:#f3f4f6}
 @keyframes spin{to{transform:rotate(360deg)}}
 #syncBtn{color:var(--navy)}
 #syncBtn:disabled{opacity:.75;cursor:default}

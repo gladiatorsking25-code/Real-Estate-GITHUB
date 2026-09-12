@@ -21,6 +21,77 @@
  */
 var SECRET = 'sabir-sync-2026';
 
+/* ============================================================
+   DAILY MORNING REPORT  (rent due + contracts expiring) via WhatsApp/email
+   ------------------------------------------------------------
+   ONE-TIME SETUP:
+   1) WhatsApp (free, via CallMeBot):
+        - On your phone, save this contact number: +34 621 331 709
+          (if it doesn't work, get the current number from
+           callmebot.com/blog/free-api-whatsapp-messages/)
+        - Send it a WhatsApp message:  I allow callmebot to send me messages to chat
+        - You'll receive an "apikey". Put your number + apikey below.
+   2) Fill OWNER_PHONE (your number, international, digits only) and CALLMEBOT_APIKEY.
+   3) (Optional) also/instead get an email: set SEND_EMAIL = true and OWNER_EMAIL.
+   4) In the Apps Script editor choose the function "createDailyTrigger" and click Run
+      once (approve permissions). That schedules the report ~7 AM daily.
+   5) To preview the message now: select "testDigest" and Run, then View → Logs.
+   ============================================================ */
+var OWNER_PHONE      = '971582779984';   // your WhatsApp number, intl, digits only (no +)
+var CALLMEBOT_APIKEY = '';               // paste the API key CallMeBot sends you
+var SEND_WHATSAPP    = true;
+var SEND_EMAIL       = false;
+var OWNER_EMAIL      = '';               // e.g. info@sabirrealestate.com
+var EXPIRY_DAYS      = 30;               // flag contracts expiring within N days
+
+function createDailyTrigger(){
+  ScriptApp.getProjectTriggers().forEach(function(t){ if(t.getHandlerFunction()==='dailyDigest') ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('dailyDigest').timeBased().atHour(7).nearMinute(0).everyDays(1).create();
+  return 'Scheduled: daily report around 7 AM.';
+}
+function dailyDigest(){
+  var msg = buildDigest();
+  if (SEND_WHATSAPP && OWNER_PHONE && CALLMEBOT_APIKEY){
+    var url='https://api.callmebot.com/whatsapp.php?phone='+encodeURIComponent(OWNER_PHONE)+'&text='+encodeURIComponent(msg)+'&apikey='+encodeURIComponent(CALLMEBOT_APIKEY);
+    try{ UrlFetchApp.fetch(url, {muteHttpExceptions:true}); }catch(e){}
+  }
+  if (SEND_EMAIL && OWNER_EMAIL){ try{ MailApp.sendEmail(OWNER_EMAIL, 'Daily Property Report', msg); }catch(e){} }
+  return msg;
+}
+function testDigest(){ var m=buildDigest(); Logger.log(m); return m; }
+
+function buildDigest(){
+  var ss=SpreadsheetApp.getActiveSpreadsheet();
+  var now=new Date(), M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  var month=now.getMonth()+1, year=now.getFullYear();
+  var table=_readTab(ss,'Table'), rents=_readTab(ss,'RentRecords');
+  var paid={};
+  rents.forEach(function(r){ if(_num(r.Month)===month && _num(r.Year)===year) paid[String(r.StudioId).trim().toLowerCase()]=true; });
+  var unpaid=[], totalDue=0, expiring=[];
+  table.forEach(function(p){
+    var unit=String(p.Location||'').trim(); if(!unit) return;
+    var tenant=String(p.TenantName||'').trim(); if(!tenant) return;
+    if(!paid[unit.toLowerCase()]){ var rent=_num(p.TenantRent); totalDue+=rent;
+      unpaid.push('• '+unit+' — '+tenant+' — AED '+_fmtNum(rent)+' (due '+_dueDay(p.TContractFrom)+' '+M[month-1]+')'); }
+    var to=_parseDate(p.TContractTo);
+    if(to){ var dl=Math.round((_strip(to)-_strip(now))/86400000); if(dl>=0 && dl<=EXPIRY_DAYS) expiring.push({line:'• '+unit+' — '+tenant+' — ends '+_fmtD(to)+' ('+dl+'d)', dl:dl}); }
+  });
+  expiring.sort(function(a,b){return a.dl-b.dl;});
+  var s='🏢 SABIR AMIN REAL ESTATE\nDaily report — '+_fmtD(now)+'\n\n';
+  s+='💰 RENT DUE ('+M[month-1]+' '+year+')\n';
+  s+= unpaid.length ? (unpaid.length+' unpaid · AED '+_fmtNum(totalDue)+' outstanding\n'+unpaid.join('\n')) : 'All collected ✅';
+  s+='\n\n📅 CONTRACTS EXPIRING (≤'+EXPIRY_DAYS+' days)\n';
+  s+= expiring.length ? expiring.map(function(x){return x.line;}).join('\n') : 'None';
+  return s;
+}
+function _readTab(ss,name){ var sh=ss.getSheetByName(name); if(!sh) return []; var v=sh.getDataRange().getValues(); if(!v.length) return []; var h=v[0].map(function(x){return String(x).trim();}); var out=[]; for(var i=1;i<v.length;i++){ var o={}; for(var c=0;c<h.length;c++){ if(h[c]) o[h[c]]=v[i][c]; } out.push(o); } return out; }
+function _num(v){ var n=parseFloat(String(v).replace(/[^0-9.\-]/g,'')); return isNaN(n)?0:n; }
+function _fmtNum(n){ return Math.round(n).toLocaleString('en-US'); }
+function _parseDate(v){ if(v instanceof Date) return v; var s=String(v||'').trim(); if(!s) return null; var m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/); if(m){ var y=+m[3]; if(y<100)y+=2000; return new Date(y,+m[2]-1,+m[1]); } var d=new Date(s); return isNaN(d)?null:d; }
+function _strip(d){ return new Date(d.getFullYear(),d.getMonth(),d.getDate()); }
+function _dueDay(v){ var d=_parseDate(v); return d?d.getDate():1; }
+function _fmtD(d){ var M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return String(d.getDate()).padStart(2,'0')+'-'+M[d.getMonth()]+'-'+String(d.getFullYear()).slice(2); }
+
 function doGet(e) {
   return json({ ok: true, msg: 'SARE sync endpoint is live' });
 }

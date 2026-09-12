@@ -70,7 +70,7 @@ function mapProperties(rows){
       unit:s(r.Location), type:s(r.Flat)||'Studio',
       ownerName:s(r.OwnerName), ownerContact:phone(r.OwnerContact),
       tenantName:s(r.TenantName), tenantContact:phone(r.TenantContact),
-      ownerRent:owner, tenantRent:ten, security:s(r.SecurityCheque),
+      ownerRent:owner, tenantRent:ten, askingRent:num(r.AskingRent), security:s(r.SecurityCheque),
       contractFrom:s(r.TContractFrom), contractTo:s(r.TContractTo),
       ownerContract:s(r.OwnerContract), maintenance:maint,
       coordinates:s(r.Coordinates), mapLink:s(r.GoogleMap),
