@@ -9,7 +9,9 @@ window.SARE_SEED = {
     "version": 1,
     "sheetId": "1ryQPlHzOeL-IfwPUIwb0u5oQSyczVon4GEEE5zCrEtk",
     "autoSync": true,
-    "lastSync": ""
+    "lastSync": "",
+    "writeUrl": "",
+    "writeSecret": "sabir-sync-2026"
   },
   "properties": [],
   "rentRecords": [],

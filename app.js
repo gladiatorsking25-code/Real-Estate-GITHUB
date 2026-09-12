@@ -100,8 +100,16 @@ function defaultData(){
   }));
 }
 function load(){
-  try{ var raw = localStorage.getItem(STORE_KEY); if(raw){ DB = JSON.parse(raw); return; } }catch(e){}
-  DB = defaultData(); save();
+  try{ var raw = localStorage.getItem(STORE_KEY); if(raw){ DB = JSON.parse(raw); migrateMeta(); return; } }catch(e){}
+  DB = defaultData(); migrateMeta(); save();
+}
+function migrateMeta(){
+  DB.meta = DB.meta || {};
+  var seedMeta = (window.SARE_SEED && window.SARE_SEED.meta) || {};
+  if(!DB.meta.sheetId) DB.meta.sheetId = seedMeta.sheetId || '';
+  if(DB.meta.autoSync===undefined) DB.meta.autoSync = seedMeta.autoSync!==undefined?seedMeta.autoSync:true;
+  if(DB.meta.writeUrl===undefined) DB.meta.writeUrl = seedMeta.writeUrl || '';
+  if(DB.meta.writeSecret===undefined || DB.meta.writeSecret==='') DB.meta.writeSecret = seedMeta.writeSecret || 'sabir-sync-2026';
 }
 function save(){ try{ localStorage.setItem(STORE_KEY, JSON.stringify(DB)); }catch(e){ toast('Storage full or blocked','err'); } }
 
@@ -543,7 +551,7 @@ function propDetail(p){
   openModal('Unit Details', body, footer, {lg:true, onOpen:function(ov){
     var e=ov.querySelector('[data-edit]'); if(e) e.onclick=function(){ closeModal(); editProperty(p); };
     var pay=ov.querySelector('[data-pay]'); if(pay) pay.onclick=function(){ closeModal(); recordRent(p.unit); };
-    var del=ov.querySelector('[data-del]'); if(del) del.onclick=function(){ confirmDialog('Delete unit '+p.unit+'? This cannot be undone.', function(){ DB.properties=DB.properties.filter(function(x){return x.id!==p.id;}); save(); closeModal(); toast('Unit deleted','ok'); renderView(); }, true); };
+    var del=ov.querySelector('[data-del]'); if(del) del.onclick=function(){ confirmDialog('Delete unit '+p.unit+'? This cannot be undone.', function(){ DB.properties=DB.properties.filter(function(x){return x.id!==p.id;}); save(); closeModal(); toast('Unit deleted','ok'); renderView(); var k=numKey(p.id,'p'); if(k) syncWrite([{action:'delete', sheet:'Table', keyCol:'S_No', key:k}]); }, true); };
   }});
 }
 function propFields(p){
@@ -573,6 +581,7 @@ function addProperty(){
     data.id=uid('p'); data.ownerRent=+data.ownerRent||0; data.tenantRent=+data.tenantRent||0; data.maintenance=+data.maintenance||0;
     data.monthlyProfit=data.tenantRent-data.ownerRent-data.maintenance;
     DB.properties.push(data); save(); closeModal(); toast('Unit added','ok'); renderView();
+    syncWrite([{action:'append', sheet:'Table', idCol:'S_No', row: propRow(data,true)}], {appended:{obj:data, prefix:'p'}});
   }, {lg:true, submitText:'Add Unit'});
 }
 function editProperty(p){
@@ -580,6 +589,7 @@ function editProperty(p){
     Object.assign(p, data); p.ownerRent=+data.ownerRent||0; p.tenantRent=+data.tenantRent||0; p.maintenance=+data.maintenance||0;
     p.monthlyProfit=p.tenantRent-p.ownerRent-p.maintenance;
     save(); closeModal(); toast('Saved','ok'); renderView();
+    syncWrite([{action:'upsert', sheet:'Table', keyCol:'S_No', key:String(p.id).replace(/^p/,''), row: propRow(p)}]);
   }, {lg:true});
 }
 
@@ -634,6 +644,7 @@ function renewContract(p){
     p.contractFrom=data.contractFrom; p.contractTo=data.contractTo; p.tenantRent=+data.tenantRent||p.tenantRent; p.security=data.security;
     p.monthlyProfit=p.tenantRent-(p.ownerRent||0)-(p.maintenance||0);
     save(); closeModal(); toast('Contract renewed','ok'); renderView();
+    syncWrite([{action:'upsert', sheet:'Table', keyCol:'S_No', key:String(p.id).replace(/^p/,''), row: propRow(p)}]);
   }, {submitText:'Save Renewal'});
 }
 
@@ -701,6 +712,8 @@ function recordRent(unit){
       maintenance:+data.maintenance||0, ownership:prop?prop.ownership:'Personnel' };
     rec.profit=(rec.amount)-(prop?Number(prop.ownerRent)||0:0)-(rec.maintenance);
     DB.rentRecords.push(rec); save(); closeModal(); toast('Payment recorded','ok'); renderView();
+    syncWrite([{action:'append', sheet:'RentRecords', idCol:'ID', row:{ StudioId:rec.unit, PaymentDate:toSheetDate(rec.date),
+      Amount:rec.amount, Ownership:rec.ownership, Month:rec.month, Year:rec.year, Maintenance:rec.maintenance, Profit:rec.profit }}], {appended:{obj:rec, prefix:'r'}});
   }, {submitText:'Save Payment'});
 }
 
@@ -776,6 +789,7 @@ function addTransaction(type){
     DB.transactions.push(t);
     adjustAccount(data.account, type==='income'?t.amount:-t.amount);
     save(); closeModal(); toast((type==='income'?'Income':'Expense')+' added','ok'); renderView();
+    syncWrite([{action:'append', sheet:'Transactions', idCol:'ID', row:{ AccountName:t.account, AccountType:t.category, TransactionType:t.type, Amount:t.amount, Description:t.description, TransactionDate:toSheetDate(t.date) }}], {appended:{obj:t, prefix:'tx'}});
   }, {submitText:'Add'});
 }
 function adjustAccount(name, delta){
@@ -832,12 +846,14 @@ function addDebt(){ formModal('Add Debt Entry', debtFields(), function(data){
   var d={id:uid('d'),person:data.person,type:data.type,amount:amt,paid:paid,balance:amt-paid,date:data.date,dueDate:data.dueDate,reason:data.reason,
     status:(amt-paid<=0?'Paid Off':paid>0?'Partial':'Active'),lastPayment:paid>0?todayISO():'',history:''};
   DB.debts.push(d); save(); closeModal(); toast('Entry added','ok'); renderView();
+  syncWrite([{action:'append', sheet:'DebtTracker', idCol:'ID', row: debtRow(d,true)}], {appended:{obj:d, prefix:'d'}});
 }, {submitText:'Add'}); }
 function editDebt(d){ formModal('Edit · '+d.person, debtFields(d), function(data){
   d.person=data.person; d.type=data.type; d.amount=+data.amount||0; d.paid=+data.paid||0; d.balance=d.amount-d.paid;
   d.date=data.date; d.dueDate=data.dueDate; d.reason=data.reason;
   d.status=(d.balance<=0?'Paid Off':d.paid>0?'Partial':'Active');
   save(); closeModal(); toast('Saved','ok'); renderView();
+  syncWrite([{action:'upsert', sheet:'DebtTracker', keyCol:'ID', key:String(d.id).replace(/^d/,''), row: debtRow(d)}]);
 }, {submitText:'Save'}); }
 function payDebt(d){ formModal('Record Payment · '+d.person, [
     {name:'amount',label:'Payment Amount (AED)',type:'number',value:d.balance,required:true,full:true},
@@ -849,6 +865,8 @@ function payDebt(d){ formModal('Record Payment · '+d.person, [
     var line=fmtDate(data.date)+': '+(d.type==='Receivable'?'Received ':'Paid ')+num(amt)+' AED'+(data.note?' ('+data.note+')':'')+(d.balance>0?' ('+num(d.balance)+' remaining)':'');
     d.history=(d.history?d.history+' | ':'')+line;
     save(); closeModal(); toast('Payment recorded','ok'); renderView();
+    syncWrite([{action:'upsert', sheet:'DebtTracker', keyCol:'ID', key:String(d.id).replace(/^d/,''),
+      row:{ PaidAmount:d.paid, Balance:d.balance, Status:d.status, LastPayment:toSheetDate(d.lastPayment), History:d.history }}]);
   }, {submitText:'Record'}); }
 
 /* ---------- DOCUMENTS ---------- */
@@ -909,8 +927,13 @@ function viewSettings(){
     '<p class="text-muted" style="font-size:12.5px;margin-top:0">The app loads live data from your Google Sheet. Keep managing your data in the Sheet, then <b>Sync</b> to refresh here. Sync <b>replaces</b> the app data with the Sheet.</p>'+
     '<div class="field"><label>Google Sheet link or ID</label><input id="sheetIdInput" value="'+esc(DB.meta.sheetId||'')+'" placeholder="https://docs.google.com/spreadsheets/d/..."></div>'+
     '<label style="display:flex;align-items:center;gap:9px;font-size:13px;font-weight:600;margin:2px 0 14px;color:var(--ink-2)"><input type="checkbox" id="autoSyncChk" '+(DB.meta.autoSync?'checked':'')+' style="width:18px;height:18px;accent-color:var(--navy)"> Auto-sync every time I open the app</label>'+
-    '<div style="display:flex;gap:9px;flex-wrap:wrap"><button class="btn primary" data-sync-now>'+icon('refresh')+'Sync now</button><button class="btn" data-save-source>'+icon('check')+'Save settings</button></div>'+
-    '<p class="text-muted" style="font-size:11.5px;margin-bottom:0">Last synced: <b>'+(DB.meta.lastSync?fmtDateTime(DB.meta.lastSync):'never')+'</b>. &nbsp;For the app to read it, the Sheet must be shared as <b>Anyone with the link → Viewer</b>.</p></div>';
+    '<div style="border-top:1px solid var(--line);margin:4px 0 14px"></div>'+
+    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><b style="font-size:13.5px;color:var(--navy)">Two-way sync — save changes back to the Sheet</b><span class="chip '+(DB.meta.writeUrl?'green':'grey')+'">'+(DB.meta.writeUrl?'On':'Off')+'</span></div>'+
+    '<p class="text-muted" style="font-size:12px;margin:0 0 10px">Paste your Apps Script <b>Web App URL</b> so app changes (debt payments, rent, edits, new units) write back to the Sheet automatically. One-time setup steps are in the file <b>apps-script/Code.gs</b>.</p>'+
+    '<div class="field"><label>Apps Script Web App URL</label><input id="writeUrlInput" value="'+esc(DB.meta.writeUrl||'')+'" placeholder="https://script.google.com/macros/s/…/exec"></div>'+
+    '<div class="field"><label>Secret (must match the value in Code.gs)</label><input id="writeSecretInput" value="'+esc(DB.meta.writeSecret||'')+'"></div>'+
+    '<div style="display:flex;gap:9px;flex-wrap:wrap"><button class="btn primary" data-sync-now>'+icon('refresh')+'Sync now</button><button class="btn" data-save-source>'+icon('check')+'Save settings</button><button class="btn" data-test-write>'+icon('refresh')+'Test write-back</button></div>'+
+    '<p class="text-muted" style="font-size:11.5px;margin-bottom:0">Last synced: <b>'+(DB.meta.lastSync?fmtDateTime(DB.meta.lastSync):'never')+'</b>. &nbsp;The Sheet must be shared as <b>Anyone with the link → Viewer</b> for reading.</p></div>';
 
   html+='<div class="grid cols-2 mt">';
   // company
@@ -984,28 +1007,39 @@ function wireView(){
   $$('[data-rent]',host).forEach(function(s){ s.onchange=function(){ STATE.filters.rent[s.getAttribute('data-rent')]=+s.value; renderView(); }; });
   var ar=$('[data-add-rent]',host); if(ar) ar.onclick=function(){ recordRent(); };
   $$('[data-pay-unit]',host).forEach(function(b){ b.onclick=function(){ recordRent(b.getAttribute('data-pay-unit')); }; });
-  $$('[data-del-rent]',host).forEach(function(b){ b.onclick=function(){ var id=b.getAttribute('data-del-rent'); confirmDialog('Delete this payment record?', function(){ DB.rentRecords=DB.rentRecords.filter(function(r){return r.id!==id;}); save(); toast('Deleted','ok'); renderView(); }, true); }; });
+  $$('[data-del-rent]',host).forEach(function(b){ b.onclick=function(){ var id=b.getAttribute('data-del-rent'); confirmDialog('Delete this payment record?', function(){ DB.rentRecords=DB.rentRecords.filter(function(r){return r.id!==id;}); save(); toast('Deleted','ok'); renderView(); var k=numKey(id,'r'); if(k) syncWrite([{action:'delete', sheet:'RentRecords', keyCol:'ID', key:k}]); }, true); }; });
   // finance
   var fy=$('[data-fin="year"]',host); if(fy) fy.onchange=function(){ STATE.filters.fin.year=+fy.value; renderView(); };
   $$('[data-add-tx]',host).forEach(function(b){ b.onclick=function(){ addTransaction(b.getAttribute('data-add-tx')); }; });
-  $$('[data-del-tx]',host).forEach(function(b){ b.onclick=function(){ var id=b.getAttribute('data-del-tx'); confirmDialog('Delete this transaction?', function(){ var t=DB.transactions.filter(function(x){return x.id===id;})[0]; if(t) adjustAccount(t.account, t.type==='income'?-t.amount:t.amount); DB.transactions=DB.transactions.filter(function(x){return x.id!==id;}); save(); toast('Deleted','ok'); renderView(); }, true); }; });
+  $$('[data-del-tx]',host).forEach(function(b){ b.onclick=function(){ var id=b.getAttribute('data-del-tx'); confirmDialog('Delete this transaction?', function(){ var t=DB.transactions.filter(function(x){return x.id===id;})[0]; if(t) adjustAccount(t.account, t.type==='income'?-t.amount:t.amount); DB.transactions=DB.transactions.filter(function(x){return x.id!==id;}); save(); toast('Deleted','ok'); renderView(); var k=numKey(id,'tx'); if(k) syncWrite([{action:'delete', sheet:'Transactions', keyCol:'ID', key:k}]); }, true); }; });
   var ea=$('[data-edit-accts]',host); if(ea) ea.onclick=editAccounts;
   var arc=$('[data-add-recur]',host); if(arc) arc.onclick=addRecurring;
-  $$('[data-del-recur]',host).forEach(function(b){ b.onclick=function(){ var id=b.getAttribute('data-del-recur'); DB.recurringExpenses=DB.recurringExpenses.filter(function(x){return x.id!==id;}); save(); renderView(); }; });
+  $$('[data-del-recur]',host).forEach(function(b){ b.onclick=function(){ var id=b.getAttribute('data-del-recur'); DB.recurringExpenses=DB.recurringExpenses.filter(function(x){return x.id!==id;}); save(); renderView(); var k=numKey(id,'re'); if(k) syncWrite([{action:'delete', sheet:'RecurringExpenses', keyCol:'ID', key:k}]); }; });
   // debts
   var ad=$('[data-add-debt]',host); if(ad) ad.onclick=addDebt;
   $$('[data-debt-pay]',host).forEach(function(b){ b.onclick=function(){ var d=DB.debts.filter(function(x){return x.id===b.getAttribute('data-debt-pay');})[0]; if(d) payDebt(d); }; });
   $$('[data-debt-edit]',host).forEach(function(b){ b.onclick=function(){ var d=DB.debts.filter(function(x){return x.id===b.getAttribute('data-debt-edit');})[0]; if(d) editDebt(d); }; });
   // tasks
   var at=$('[data-add-task]',host); if(at) at.onclick=addTask;
-  $$('[data-task-toggle]',host).forEach(function(c){ c.onchange=function(){ var t=DB.tasks.filter(function(x){return x.id===c.getAttribute('data-task-toggle');})[0]; if(t){ t.done=c.checked; save(); renderView(); } }; });
-  $$('[data-task-del]',host).forEach(function(b){ b.onclick=function(){ var id=b.getAttribute('data-task-del'); DB.tasks=DB.tasks.filter(function(x){return x.id!==id;}); save(); toast('Deleted','ok'); renderView(); }; });
+  $$('[data-task-toggle]',host).forEach(function(c){ c.onchange=function(){ var t=DB.tasks.filter(function(x){return x.id===c.getAttribute('data-task-toggle');})[0]; if(t){ t.done=c.checked; save(); renderView(); var k=numKey(t.id,'t'); if(k) syncWrite([{action:'upsert', sheet:'pending actions', keyCol:'Id', key:k, row:{ IsCompleted: t.done?1:0 }}]); } }; });
+  $$('[data-task-del]',host).forEach(function(b){ b.onclick=function(){ var id=b.getAttribute('data-task-del'); DB.tasks=DB.tasks.filter(function(x){return x.id!==id;}); save(); toast('Deleted','ok'); renderView(); var k=numKey(id,'t'); if(k) syncWrite([{action:'delete', sheet:'pending actions', keyCol:'Id', key:k}]); }; });
   // settings
   var sn=$('[data-sync-now]',host); if(sn) sn.onclick=function(){ syncFromSheet({}); };
   var ss=$('[data-save-source]',host); if(ss) ss.onclick=function(){
     var raw=$('#sheetIdInput',host).value; var newId=window.SARE_SHEETS?window.SARE_SHEETS.extractId(raw):raw.trim();
-    DB.meta.sheetId=newId; DB.meta.autoSync=$('#autoSyncChk',host).checked; save();
-    toast(newId?'Saved · sheet connected':'Saved · sheet cleared','ok'); renderView();
+    DB.meta.sheetId=newId; DB.meta.autoSync=$('#autoSyncChk',host).checked;
+    var wu=$('#writeUrlInput',host); if(wu) DB.meta.writeUrl=wu.value.trim();
+    var wsx=$('#writeSecretInput',host); if(wsx) DB.meta.writeSecret=wsx.value.trim();
+    save();
+    toast('Settings saved'+(DB.meta.writeUrl?' · two-way sync on':''),'ok'); renderView();
+  };
+  var tw=$('[data-test-write]',host); if(tw) tw.onclick=function(){
+    var url=($('#writeUrlInput',host)||{}).value; url=url?url.trim():DB.meta.writeUrl;
+    var sec=($('#writeSecretInput',host)||{}).value; sec=sec?sec.trim():DB.meta.writeSecret;
+    if(!url){ toast('Paste the Web App URL first','err'); return; }
+    toast('Testing…');
+    window.SARE_SHEETS.ping(url, sec).then(function(r){ toast(r&&r.ok?'Connected to Google Sheet ✓':'Failed'+(r&&r.error?': '+r.error:' — check URL/secret'), r&&r.ok?'ok':'err'); })
+      .catch(function(){ toast('Could not reach the script URL','err'); });
   };
   var bk=$('[data-backup]',host); if(bk) bk.onclick=doBackup;
   var rs=$('[data-restore]',host); if(rs) rs.onclick=function(){ $('#restoreFile').click(); };
@@ -1023,17 +1057,22 @@ function editAccounts(){
   var all=(DB.accounts.company||[]).map(function(a){return {a:a,g:'company'};}).concat((DB.accounts.personnel||[]).map(function(a){return {a:a,g:'personnel'};}));
   var fields=[]; all.forEach(function(x,i){ fields.push({name:'b'+i,label:x.a.name+' ('+x.g+')',type:'number',value:x.a.balance,full:true}); });
   if(!fields.length){ toast('No accounts to edit'); return; }
-  formModal('Adjust Account Balances', fields, function(data){ all.forEach(function(x,i){ x.a.balance=+data['b'+i]||0; }); save(); closeModal(); toast('Balances updated','ok'); renderView(); });
+  formModal('Adjust Account Balances', fields, function(data){ all.forEach(function(x,i){ x.a.balance=+data['b'+i]||0; }); save(); closeModal(); toast('Balances updated','ok'); renderView();
+    var writes=all.map(function(x){ return {action:'upsert', sheet:(x.g==='company'?'CompanyAccounts':'PersonnelAccounts'), keyCol:'ID', key:String(x.a.id).replace(/^(c|pa)/,''), row:{ CurrentBalance:x.a.balance }}; });
+    if(writes.length) syncWrite(writes);
+  });
 }
 function addRecurring(){ formModal('Add Recurring Expense', [
   {name:'name',label:'Name',required:true,full:true},{name:'amount',label:'Amount (AED)',type:'number',required:true},
   {name:'frequency',label:'Frequency',type:'select',value:'Monthly',options:['Monthly','Yearly','Weekly']},
   {name:'accountType',label:'Account',type:'select',value:'Personnel',options:['Personnel','Company']}
-], function(data){ DB.recurringExpenses.push({id:uid('re'),name:data.name,amount:+data.amount||0,frequency:data.frequency,accountType:data.accountType}); save(); closeModal(); toast('Added','ok'); renderView(); }); }
+], function(data){ var e={id:uid('re'),name:data.name,amount:+data.amount||0,frequency:data.frequency,accountType:data.accountType}; DB.recurringExpenses.push(e); save(); closeModal(); toast('Added','ok'); renderView();
+  syncWrite([{action:'append', sheet:'RecurringExpenses', idCol:'ID', row:{ AccountName:e.name, Amount:e.amount, Frequency:e.frequency, AccountType:e.accountType }}], {appended:{obj:e, prefix:'re'}}); }); }
 function addTask(){ formModal('Add Task', [
   {name:'description',label:'Description',type:'textarea',required:true,full:true},
   {name:'dueDate',label:'Due Date',type:'date',value:'',full:true}
-], function(data){ DB.tasks.push({id:uid('t'),description:data.description,dueDate:data.dueDate,done:false,createdAt:new Date().toISOString()}); save(); closeModal(); toast('Task added','ok'); renderView(); }); }
+], function(data){ var t={id:uid('t'),description:data.description,dueDate:data.dueDate,done:false,createdAt:new Date().toISOString()}; DB.tasks.push(t); save(); closeModal(); toast('Task added','ok'); renderView();
+  syncWrite([{action:'append', sheet:'pending actions', idCol:'Id', row:{ Description:t.description, DueDate:toSheetDate(t.dueDate), IsCompleted:0, CreatedAt:t.createdAt }}], {appended:{obj:t, prefix:'t'}}); }); }
 function addUser(){ formModal('Add User', [
   {name:'username',label:'Username',required:true},{name:'password',label:'Password',required:true},
   {name:'role',label:'Role',type:'select',value:'agent',options:[{value:'admin',label:'Admin (full access)'},{value:'agent',label:'Agent (properties)'},{value:'accountant',label:'Accountant (finance)'}]}
@@ -1109,6 +1148,47 @@ async function syncFromSheet(opts){
     return false;
   }
 }
+
+/* ---------- Two-way write-back to the sheet ---------- */
+function writeEnabled(){ return !!(DB.meta && DB.meta.writeUrl && window.SARE_SHEETS && window.SARE_SHEETS.push); }
+function toSheetDate(v){ var d=parseDate(v); if(!d) return v||''; return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+/* Fire a write to the sheet. opts.appended = {obj, prefix} patches the local id with the sheet's new id. */
+function syncWrite(writes, opts){
+  opts=opts||{};
+  if(!writeEnabled()){
+    if(!DB.meta.__warnedNoWrite){ DB.meta.__warnedNoWrite=true; }
+    return; // write-back not set up; local-only
+  }
+  window.SARE_SHEETS.push(DB.meta.writeUrl, DB.meta.writeSecret||'', writes).then(function(res){
+    if(res && res.ok){
+      toast('Google Sheet updated ✓','ok');
+      if(opts.appended && res.results){
+        var ap=res.results.filter(function(x){return x && x.appended;})[0];
+        if(ap && ap.id!=null && ap.id!=='' && opts.appended.obj && opts.appended.prefix){
+          opts.appended.obj.id=opts.appended.prefix+ap.id; save();
+        }
+      }
+    } else {
+      toast('Saved locally — sheet not updated'+(res&&res.error?': '+res.error:''),'err');
+    }
+  }).catch(function(){ toast('Saved locally — could not reach the sheet','err'); });
+}
+function debtRow(d, forAppend){
+  var row={ Type:d.type, Person:d.person, Amount:d.amount, Date:toSheetDate(d.date), DueDate:toSheetDate(d.dueDate),
+    Reason:d.reason, PaidAmount:d.paid, Balance:d.balance, Status:d.status, LastPayment:toSheetDate(d.lastPayment), History:d.history };
+  if(!forAppend) row.ID=String(d.id).replace(/^d/,'');
+  return row;
+}
+function propRow(p, forAppend){
+  var row={ Flat:p.type, OwnerName:p.ownerName, OwnerContact:p.ownerContact, TenantName:p.tenantName, TenantContact:p.tenantContact,
+    Location:p.unit, OwnerRent:p.ownerRent, TenantRent:p.tenantRent, SecurityCheque:p.security,
+    TContractFrom:toSheetDate(p.contractFrom), TContractTo:toSheetDate(p.contractTo), Property:p.ownership,
+    OwnerContract:toSheetDate(p.ownerContract), Maintenance:p.maintenance, Coordinates:p.coordinates, GoogleMap:p.mapLink,
+    ReadyToMove:p.readyToMove?'Yes':'No', DriveFolderLink:p.driveLink, Profit:p.monthlyProfit };
+  if(!forAppend) row.S_No=String(p.id).replace(/^p/,'');
+  return row;
+}
+function numKey(id, prefix){ var n=String(id).replace(new RegExp('^'+prefix),''); return /^\d+$/.test(n)?n:''; }
 
 /* ============================================================
    AUTH + SHELL

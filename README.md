@@ -35,10 +35,34 @@ The app pulls all data straight from your Google Sheet:
 > **Anyone with the link → Viewer** (yours already is). This also means anyone who
 > has the Sheet link can read its contents — keep the link private.
 
-> ✍️ **Editing:** the on-screen Add/Edit/Record buttons change your **local view**;
-> they do **not** write back to the Sheet yet, and are overwritten on the next Sync.
-> To change data permanently, edit the Google Sheet. (Two-way write-back can be
-> added later via a Google Apps Script — ask if you want it.)
+> ✍️ **Editing → two-way sync:** once you complete the one-time setup below, the
+> on-screen Add/Edit/Record buttons (debt payments, rent, unit edits, tasks…) write
+> straight back to your Google Sheet. Until then they only change the local view and
+> are overwritten on the next Sync.
+
+## ✅ Two-way sync setup (one time, ~3 minutes)
+
+This lets the app **save changes back** to your Sheet.
+
+1. Open your Google Sheet → menu **Extensions → Apps Script**.
+2. Delete whatever is there and paste **all** of the file **`apps-script/Code.gs`**
+   (in this project). Click the **Save** icon.
+3. Click **Deploy → New deployment**. Set:
+   - Type: **Web app**
+   - Execute as: **Me**
+   - Who has access: **Anyone**
+   Click **Deploy** and allow the permissions Google asks for.
+4. Copy the **Web app URL** (it ends with `/exec`).
+5. In the app: **Settings → Two-way sync** → paste the URL → **Save settings** →
+   **Test write-back** (should say "Connected ✓").
+
+That's it. From now on, every change you make in the app updates the Sheet, and the
+Sheet stays your single source of truth. (The secret in `Code.gs` and in the app must
+match — both default to `sabir-sync-2026`; change both together if you like.)
+
+> Note: any change you made in the app **before** setting this up was local only and
+> may not be in the Sheet — just re-enter it once write-back is on (or type it in the
+> Sheet directly).
 
 ## 🌐 Put the app online with GitHub (free, ~5 min)
 
@@ -86,8 +110,9 @@ Change these in **Settings → Users** after first sign-in.
 
 > This login gates the on-screen app only; it is not bank-grade security.
 
-## 🔄 Want two-way sync (edit in the app → updates the Sheet)?
+## What writes back to the Sheet
 
-Reading is built in. Writing back to the Sheet from a static site needs a small
-Google Apps Script "web app" endpoint. Ask to have this set up and the app's
-Add/Edit/Record actions can update your Sheet directly.
+Once two-way sync is set up, these all update the Google Sheet automatically:
+debt payments & new debts (DebtTracker), rent payments (RentRecords), unit add/edit/
+delete & contract renewals (Table), tasks (pending actions), finance transactions
+(Transactions), recurring expenses (RecurringExpenses) and account balances.

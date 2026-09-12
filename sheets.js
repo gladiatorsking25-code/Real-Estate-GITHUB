@@ -147,6 +147,23 @@ async function fetchAll(id){
   };
 }
 
+/* Write back to the sheet via the Apps Script web app.
+   Uses text/plain to stay a "simple" CORS request (no preflight). */
+async function push(url, secret, writes){
+  var r = await fetch(url, {
+    method:'POST', redirect:'follow',
+    headers:{'Content-Type':'text/plain;charset=utf-8'},
+    body: JSON.stringify({ secret: secret||'', writes: writes })
+  });
+  var t = await r.text();
+  try { return JSON.parse(t); } catch(e){ return { ok:false, raw:t.slice(0,200) }; }
+}
+async function ping(url, secret){
+  var r = await fetch(url, { method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body: JSON.stringify({secret:secret||'', action:'ping'}) });
+  var t = await r.text();
+  try { return JSON.parse(t); } catch(e){ return { ok:false, raw:t.slice(0,200) }; }
+}
+
 /* Extract a spreadsheet id from a full URL or raw id */
 function extractId(input){
   var s=String(input||'').trim();
@@ -156,5 +173,5 @@ function extractId(input){
   return '';
 }
 
-return { fetchAll: fetchAll, extractId: extractId, parseCSV: parseCSV };
+return { fetchAll: fetchAll, extractId: extractId, parseCSV: parseCSV, push: push, ping: ping };
 })();

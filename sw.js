@@ -1,5 +1,5 @@
 /* Simple offline cache for Sabir Amin Real Estate PWA */
-const CACHE = 'sare-v2';
+const CACHE = 'sare-v3';
 const ASSETS = [
   './','./index.html','./styles.css','./app.js','./seed.js','./sheets.js','./manifest.webmanifest',
   './assets/logo.svg','./assets/icon.svg','./assets/favicon.png',
