@@ -6,7 +6,7 @@
 'use strict';
 
 /* ---------- Constants ---------- */
-var APP_VERSION = '1.4.0';
+var APP_VERSION = '1.5.0';
 var STORE_KEY = 'SARE_DB_v1';
 var SESSION_KEY = 'SARE_SESSION';
 var CUR = 'AED';
@@ -137,6 +137,32 @@ function rentFor(month, year){ return DB.rentRecords.filter(function(r){ return 
 function curMonth(){ return new Date().getMonth()+1; }
 function curYear(){ return new Date().getFullYear(); }
 
+function sameUnit(a,b){ return String(a||'').trim().toLowerCase()===String(b||'').trim().toLowerCase(); }
+function isRentPaid(unit, m, y){
+  return DB.rentRecords.some(function(r){ return r.month===m && r.year===y && sameUnit(r.unit, unit); });
+}
+/* Every month whose rent is past its due date and still unpaid, for the last N months. */
+function arrearsList(lookbackMonths){
+  lookbackMonths = lookbackMonths||3;
+  var today=new Date(); today.setHours(0,0,0,0);
+  var out=[];
+  DB.properties.filter(isOccupied).forEach(function(p){
+    var rent=Number(p.tenantRent)||0; if(!rent) return;
+    var start=parseDate(p.contractFrom);
+    var startMonth = start ? new Date(start.getFullYear(), start.getMonth(), 1) : null;
+    for(var i=lookbackMonths-1;i>=0;i--){
+      var d=new Date(today.getFullYear(), today.getMonth()-i, 1);
+      if(startMonth && d<startMonth) continue;          // before this tenancy began
+      var m=d.getMonth()+1, y=d.getFullYear();
+      var due=rentDueDate(p,m,y);
+      if(due>today) continue;                            // not due yet
+      if(isRentPaid(p.unit,m,y)) continue;               // already paid
+      out.push({p:p, m:m, y:y, amount:rent, due:due, days:Math.round((today-due)/86400000)});
+    }
+  });
+  out.sort(function(a,b){ return b.days-a.days; });
+  return out;
+}
 function expiringList(days){
   return DB.properties.filter(isOccupied).map(function(p){ return {p:p, dl:daysUntil(p.contractTo)}; })
     .filter(function(x){ return x.dl!==null && x.dl<=days; })
@@ -410,6 +436,37 @@ function viewDashboard(){
     kpi({icon:'cash',tint:'tint-purple',val:money(Math.max(expected-collected,0)),lbl:'Pending to collect · '+MONTHS[m]})+
     kpi({icon:'check',tint:'tint-blue',val:openTasks().length,lbl:'Open Tasks'})+
   '</div>';
+
+  // ---- Rent arrears ----
+  var arr=arrearsList(3);
+  var arrTotal=arr.reduce(function(s,x){return s+x.amount;},0);
+  var aA=arr.filter(function(x){return x.days<=7;}), aB=arr.filter(function(x){return x.days>7&&x.days<=30;}), aC=arr.filter(function(x){return x.days>30;});
+  html+='<div class="card pad mt"'+(arr.length?' style="border-color:#f3c6c2"':'')+'><div class="card-h">'+
+    '<h3>Rent Arrears</h3><span class="sub">unpaid & past due · last 3 months</span>'+
+    '<div class="right"><button class="btn sm ghost" data-nav="rent">Rent roll '+icon('chevron')+'</button></div></div>';
+  if(!arr.length) html+=emptyState('No arrears — everything due has been collected 🎉');
+  else{
+    html+='<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:14px">'+
+      '<div><div style="font-size:26px;font-weight:800;color:var(--red);line-height:1">'+money(arrTotal)+'</div>'+
+      '<div class="text-muted" style="font-size:12px;font-weight:600">'+arr.length+' unpaid month'+(arr.length>1?'s':'')+' across '+uniq(arr.map(function(x){return x.p.unit;})).length+' units</div></div>'+
+      '<div style="display:flex;gap:7px;flex-wrap:wrap;margin-left:auto">'+
+        (aA.length?'<span class="chip gold">≤7 days · '+aA.length+'</span>':'')+
+        (aB.length?'<span class="chip red">8–30 days · '+aB.length+'</span>':'')+
+        (aC.length?'<span class="chip red" style="background:#e23b2e;color:#fff">30+ days · '+aC.length+'</span>':'')+
+      '</div></div>';
+    html+=arr.slice(0,7).map(function(x){ var tc=phoneLinks(x.p.tenantContact);
+      var cls = x.days>30?'red':x.days>7?'red':'gold';
+      return '<div class="lrow"><div class="av '+(x.days>7?'tint-red':'tint-gold')+'">'+esc((x.p.tenantName||'?')[0].toUpperCase())+'</div>'+
+        '<div class="gr"><b>'+esc(x.p.unit)+' · '+esc(x.p.tenantName)+'</b>'+
+        '<span>'+MONTHS[x.m]+' '+x.y+' · was due '+x.due.getDate()+' '+MONTHS[x.m]+'</span></div>'+
+        '<span class="chip '+cls+'">'+x.days+'d late</span>'+
+        '<span class="amt neg" style="min-width:92px;text-align:right">'+money(x.amount)+'</span>'+
+        (tc?'<button class="btn sm" data-remind-arrear="'+esc(x.p.unit)+'::'+x.m+'::'+x.y+'" title="WhatsApp reminder">'+icon('whatsapp')+'</button>':'')+
+      '</div>';
+    }).join('');
+    if(arr.length>7) html+='<p class="text-muted" style="font-size:12px;margin:10px 0 0">+ '+(arr.length-7)+' more — see the Rent roll</p>';
+  }
+  html+='</div>';
 
   // charts row
   html+='<div class="grid cols-3 mt">';
@@ -759,8 +816,11 @@ function recordRent(unit){
 
 /* ---------- WhatsApp reminders ---------- */
 function waOpen(contact, msg){ var pl=phoneLinks(contact); if(!pl){ toast('No contact number saved for this tenant','err'); return; } window.open(pl.wa+'?text='+encodeURIComponent(msg),'_blank'); }
-function remindRent(unit){ var p=getProp(unit); if(!p) return; var f=STATE.filters.rent||{month:curMonth(),year:curYear()};
-  var msg='Dear '+(p.tenantName||'Tenant')+', gentle reminder: your rent of '+money(p.tenantRent||0)+' for '+MONTHS[f.month]+' '+f.year+' (unit '+p.unit+') is due. Kindly arrange the payment. Thank you — '+(DB.meta.company||'Sabir Amin Real Estate')+'.';
+function remindRent(unit, mm, yy){ var p=getProp(unit); if(!p) return; var f=STATE.filters.rent||{month:curMonth(),year:curYear()};
+  var m=mm||f.month, y=yy||f.year;
+  var due=rentDueDate(p,m,y), od=daysUntil(due);
+  var when = (od!==null && od<0) ? (' is now '+Math.abs(od)+' days overdue (was due '+due.getDate()+' '+MONTHS[m]+')') : ' is due';
+  var msg='Dear '+(p.tenantName||'Tenant')+', gentle reminder: your rent of '+money(p.tenantRent||0)+' for '+MONTHS[m]+' '+y+' (unit '+p.unit+')'+when+'. Kindly arrange the payment. Thank you — '+(DB.meta.company||'Sabir Amin Real Estate')+'.';
   waOpen(p.tenantContact, msg); }
 function remindContract(pid){ var p=DB.properties.filter(function(x){return x.id===pid;})[0]; if(!p) return; var dl=daysUntil(p.contractTo);
   var when; if(dl==null){ when='ending soon'; } else if(dl<0){ when='expired '+Math.abs(dl)+' days ago'; } else { when='due for renewal in '+dl+' days ('+fmtDate(p.contractTo)+')'; }
@@ -1342,6 +1402,7 @@ function wireView(){
   var ar=$('[data-add-rent]',host); if(ar) ar.onclick=function(){ recordRent(); };
   $$('[data-pay-unit]',host).forEach(function(b){ b.onclick=function(){ recordRent(b.getAttribute('data-pay-unit')); }; });
   $$('[data-remind-rent]',host).forEach(function(b){ b.onclick=function(){ remindRent(b.getAttribute('data-remind-rent')); }; });
+  $$('[data-remind-arrear]',host).forEach(function(b){ b.onclick=function(){ var a=b.getAttribute('data-remind-arrear').split('::'); remindRent(a[0], +a[1], +a[2]); }; });
   $$('[data-remind-contract]',host).forEach(function(b){ b.onclick=function(){ remindContract(b.getAttribute('data-remind-contract')); }; });
   $$('[data-del-rent]',host).forEach(function(b){ b.onclick=function(){ var id=b.getAttribute('data-del-rent'); confirmDialog('Delete this payment record?', function(){ DB.rentRecords=DB.rentRecords.filter(function(r){return r.id!==id;}); save(); toast('Deleted','ok'); renderView(); var k=numKey(id,'r'); if(k) syncWrite([{action:'delete', sheet:'RentRecords', keyCol:'ID', key:k}]); }, true); }; });
   // profit & loss

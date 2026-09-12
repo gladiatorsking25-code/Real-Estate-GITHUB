@@ -43,6 +43,7 @@ var SEND_WHATSAPP    = true;
 var SEND_EMAIL       = false;
 var OWNER_EMAIL      = '';               // e.g. info@sabirrealestate.com
 var EXPIRY_DAYS      = 30;               // flag contracts expiring within N days
+var ESCALATE_DAYS    = 7;                // rent later than this is reported as URGENT
 
 function createDailyTrigger(){
   ScriptApp.getProjectTriggers().forEach(function(t){ if(t.getHandlerFunction()==='dailyDigest') ScriptApp.deleteTrigger(t); });
@@ -51,6 +52,8 @@ function createDailyTrigger(){
 }
 function dailyDigest(){
   var msg = buildDigest();
+  // CallMeBot sends via a URL, so keep the message within a safe length
+  if (msg.length > 3200) msg = msg.substring(0, 3200) + '\n… (list truncated — open the app for the full picture)';
   if (SEND_WHATSAPP && OWNER_PHONE && CALLMEBOT_APIKEY){
     var url='https://api.callmebot.com/whatsapp.php?phone='+encodeURIComponent(OWNER_PHONE)+'&text='+encodeURIComponent(msg)+'&apikey='+encodeURIComponent(CALLMEBOT_APIKEY);
     try{ UrlFetchApp.fetch(url, {muteHttpExceptions:true}); }catch(e){}
@@ -64,22 +67,69 @@ function buildDigest(){
   var ss=SpreadsheetApp.getActiveSpreadsheet();
   var now=new Date(), M=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   var month=now.getMonth()+1, year=now.getFullYear();
+  var prevM = month===1?12:month-1, prevY = month===1?year-1:year;
   var table=_readTab(ss,'Table'), rents=_readTab(ss,'RentRecords');
+
+  // key = unit|month|year  ->  paid
   var paid={};
-  rents.forEach(function(r){ if(_num(r.Month)===month && _num(r.Year)===year) paid[String(r.StudioId).trim().toLowerCase()]=true; });
-  var unpaid=[], totalDue=0, expiring=[];
+  rents.forEach(function(r){ paid[String(r.StudioId).trim().toLowerCase()+'|'+_num(r.Month)+'|'+_num(r.Year)]=true; });
+
+  var urgent=[], pending=[], carried=[], expiring=[];
+  var totalDue=0, urgentAmt=0, carriedAmt=0;
+
   table.forEach(function(p){
     var unit=String(p.Location||'').trim(); if(!unit) return;
     var tenant=String(p.TenantName||'').trim(); if(!tenant) return;
-    if(!paid[unit.toLowerCase()]){ var rent=_num(p.TenantRent); totalDue+=rent;
-      unpaid.push('• '+unit+' — '+tenant+' — AED '+_fmtNum(rent)+' (due '+_dueDay(p.TContractFrom)+' '+M[month-1]+')'); }
+    var rent=_num(p.TenantRent);
+    var phone=String(p.TenantContact||'').replace(/[^0-9]/g,'');
+    var dd=_dueDay(p.TContractFrom);
+
+    // ---- this month ----
+    if(!paid[unit.toLowerCase()+'|'+month+'|'+year]){
+      totalDue+=rent;
+      var dim=new Date(year,month,0).getDate();
+      var due=new Date(year, month-1, Math.min(dd,dim));
+      var days=Math.round((_strip(now)-_strip(due))/86400000);
+      if(days>ESCALATE_DAYS){
+        urgentAmt+=rent;
+        urgent.push({days:days, line:'‼️ '+unit+' — '+tenant+'\n   AED '+_fmtNum(rent)+' · '+days+' DAYS LATE (due '+dd+' '+M[month-1]+')'+(phone?'\n   📞 '+phone:'')});
+      } else if(days>=0){
+        pending.push({days:days, line:'• '+unit+' — '+tenant+' — AED '+_fmtNum(rent)+' · '+(days===0?'due today':days+'d late')});
+      } else {
+        pending.push({days:days, line:'• '+unit+' — '+tenant+' — AED '+_fmtNum(rent)+' · due '+dd+' '+M[month-1]});
+      }
+    }
+    // ---- previous month still unpaid ----
+    if(!paid[unit.toLowerCase()+'|'+prevM+'|'+prevY]){
+      carriedAmt+=rent;
+      carried.push('🔴 '+unit+' — '+tenant+' — AED '+_fmtNum(rent)+' ('+M[prevM-1]+' '+prevY+' unpaid)');
+    }
+    // ---- expiring contracts ----
     var to=_parseDate(p.TContractTo);
-    if(to){ var dl=Math.round((_strip(to)-_strip(now))/86400000); if(dl>=0 && dl<=EXPIRY_DAYS) expiring.push({line:'• '+unit+' — '+tenant+' — ends '+_fmtD(to)+' ('+dl+'d)', dl:dl}); }
+    if(to){ var dl=Math.round((_strip(to)-_strip(now))/86400000);
+      if(dl>=0 && dl<=EXPIRY_DAYS) expiring.push({dl:dl, line:'• '+unit+' — '+tenant+' — ends '+_fmtD(to)+' ('+dl+'d)'}); }
   });
+
+  urgent.sort(function(a,b){return b.days-a.days;});
+  pending.sort(function(a,b){return b.days-a.days;});
   expiring.sort(function(a,b){return a.dl-b.dl;});
-  var s='🏢 SABIR AMIN REAL ESTATE\nDaily report — '+_fmtD(now)+'\n\n';
-  s+='💰 RENT DUE ('+M[month-1]+' '+year+')\n';
-  s+= unpaid.length ? (unpaid.length+' unpaid · AED '+_fmtNum(totalDue)+' outstanding\n'+unpaid.join('\n')) : 'All collected ✅';
+
+  var s='🏢 SABIR AMIN REAL ESTATE\nDaily report — '+_fmtD(now)+'\n';
+  s+='────────────────────\n';
+  s+='Outstanding this month: AED '+_fmtNum(totalDue)+'\n';
+  if(urgent.length) s+='Urgent (>'+ESCALATE_DAYS+'d late): '+urgent.length+' · AED '+_fmtNum(urgentAmt)+'\n';
+  if(carried.length) s+='Carried over from '+M[prevM-1]+': '+carried.length+' · AED '+_fmtNum(carriedAmt)+'\n';
+
+  if(urgent.length){
+    s+='\n🚨 URGENT — CHASE TODAY ('+M[month-1]+' '+year+')\n'+urgent.map(function(x){return x.line;}).join('\n');
+  }
+  if(carried.length){
+    s+='\n\n⏮️ STILL UNPAID FROM '+M[prevM-1].toUpperCase()+' '+prevY+'\n'+carried.join('\n');
+  }
+  s+='\n\n💰 REST OF '+M[month-1].toUpperCase()+' '+year+'\n';
+  s+= pending.length ? pending.map(function(x){return x.line;}).join('\n')
+    : (urgent.length? 'Nothing else outstanding.' : 'All collected ✅');
+
   s+='\n\n📅 CONTRACTS EXPIRING (≤'+EXPIRY_DAYS+' days)\n';
   s+= expiring.length ? expiring.map(function(x){return x.line;}).join('\n') : 'None';
   return s;

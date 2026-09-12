@@ -128,6 +128,19 @@ was paid, and a status chip — `Overdue 11d`, `Due 8 Sep`, or `Paid 30 Aug`. Ov
 rows are highlighted, with a WhatsApp reminder button and a **Collect** button.
 A red summary shows *"N unpaid · AED X outstanding this month"*.
 
+## Rent arrears
+
+The **Dashboard** has a **Rent Arrears** card showing every month whose rent is past
+its due date and still unpaid (looking back 3 months), with:
+
+- total arrears and how many units are involved,
+- **aging buckets** — `≤7 days`, `8–30 days`, `30+ days`,
+- the worst offenders first (unit, tenant, which month, how many days late, amount),
+- a WhatsApp button per row that writes a reminder naming that exact month.
+
+A month only counts as arrears once its due date has passed, and never before that
+tenant's contract started — so it never invents debt.
+
 ## Profit & Loss (your accounts)
 
 **Profit & Loss** in the sidebar is the full accounting statement, built from
@@ -161,8 +174,14 @@ One-time setup (all inside `apps-script/Code.gs`, see the comments at the top):
    **Run** once. That schedules it for ~7 AM daily.
 4. To preview the message immediately, run **`testDigest`** and check View → Logs.
 
-The message lists every unpaid unit (tenant, amount, due day), the total
-outstanding, and every contract expiring within `EXPIRY_DAYS` (default 30).
+The message is organised so you can act on it immediately:
+
+- a summary line (total outstanding, urgent count, carried-over count),
+- 🚨 **URGENT — CHASE TODAY**: rent more than `ESCALATE_DAYS` late (default 7),
+  worst first, **with the tenant's phone number**,
+- ⏮️ **STILL UNPAID FROM [last month]** — carried-over debt,
+- 💰 the rest of this month (due today / a few days late),
+- 📅 contracts expiring within `EXPIRY_DAYS` (default 30).
 
 ## Studio marketing flyer (ad)
 
